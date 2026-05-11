@@ -20,7 +20,7 @@ genai.configure(api_key=GEMINI_API_KEY)
 class MangaProcessor:
     
     def __init__(self):
-        self.model = genai.GenerativeModel('gemini-1.5-flash')
+        self.model = genai.GenerativeModel('gemini-2.0-flash')
         self.temp_files = []
     
     # ─────────────────────────────────────────
@@ -204,7 +204,9 @@ Sirf JSON do, kuch aur mat likho."""
                 continue
             
             img_path = image_paths[idx]
-            hindi_text = item["hindi_text"]
+            hindi_text = item.get("hindi_text") or "Is page mein kahani aage badhti hai."
+            if not hindi_text.strip():
+                hindi_text = "Is page mein kahani aage badhti hai."
             
             # Audio generate karo
             audio_tmp = tempfile.NamedTemporaryFile(suffix='.mp3', delete=False)
