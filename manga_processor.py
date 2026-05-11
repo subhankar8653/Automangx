@@ -220,7 +220,9 @@ Sirf JSON do, kuch aur mat likho."""
             
             # Image clip banao same duration ka
             img_clip = ImageClip(img_path, duration=total_duration)
-            img_clip = img_clip.set_audio(audio_clip)
+            # Audio clip ko copy karke set karo, phir original close karo
+            img_clip = img_clip.set_audio(audio_clip.set_duration(audio_duration))
+            audio_clip.close()
             
             # Resize to standard YouTube size
             img_clip = img_clip.resize(height=1080)
@@ -237,16 +239,34 @@ Sirf JSON do, kuch aur mat likho."""
         output_tmp = tempfile.NamedTemporaryFile(suffix='_manga_video.mp4', delete=False)
         self.temp_files.append(output_tmp.name)
         
+        # Proper temp audio file path - same dir mein (Broken Pipe fix)
+        import os as _os
+        temp_audio_path = _os.path.join(
+            tempfile.gettempdir(), 
+            next(tempfile._get_candidate_names()) + '_temp_audio.m4a'
+        )
+        self.temp_files.append(temp_audio_path)
+        
         final_video.write_videofile(
             output_tmp.name,
             fps=24,
             codec='libx264',
             audio_codec='aac',
-            temp_audiofile=tempfile.mktemp(suffix='.m4a'),
+            temp_audiofile=temp_audio_path,
             remove_temp=True,
+            threads=2,
+            preset='ultrafast',
             verbose=False,
             logger=None
         )
+        
+        # Resources properly close karo
+        final_video.close()
+        for clip in clips:
+            try:
+                clip.close()
+            except Exception:
+                pass
         
         logger.info(f"Video ban gayi: {output_tmp.name}")
         return output_tmp.name
