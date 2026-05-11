@@ -1,0 +1,8 @@
+python-telegram-bot==20.7
+google-generativeai==0.4.1
+edge-tts==6.1.9
+moviepy==1.0.3
+opencv-python-headless==4.9.0.80
+Pillow==10.2.0
+pdf2image==1.17.0
+numpy==1.26.4
