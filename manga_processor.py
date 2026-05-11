@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 from PIL import Image
 import google.generativeai as genai
-import edge_tts
+from gtts import gTTS
 from moviepy.editor import (ImageClip, AudioFileClip, concatenate_videoclips,
                               CompositeVideoClip)
 from pdf2image import convert_from_path
@@ -16,9 +16,6 @@ logger = logging.getLogger(__name__)
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_GEMINI_KEY_HERE")
 genai.configure(api_key=GEMINI_API_KEY)
-
-# Edge TTS Hindi voice — natural female voice
-HINDI_VOICE = "hi-IN-SwaraNeural"
 
 class MangaProcessor:
     
@@ -179,18 +176,18 @@ Sirf JSON do, kuch aur mat likho."""
         return script_parts
     
     # ─────────────────────────────────────────
-    # 4. Edge TTS se Audio Generate karo
+    # 4. gTTS se Audio Generate karo (Google)
     # ─────────────────────────────────────────
     async def text_to_speech(self, text: str, output_path: str):
-        """Hindi text ko natural voice mein convert karo"""
-        communicate = edge_tts.Communicate(
-            text=text,
-            voice=HINDI_VOICE,
-            rate="+5%",    # Thodi fast — natural lage
-            pitch="+0Hz",
-            volume="+0%"
-        )
-        await communicate.save(output_path)
+        """Hindi text ko Google TTS se voice mein convert karo"""
+        loop = asyncio.get_event_loop()
+        
+        def generate():
+            tts = gTTS(text=text, lang='hi', slow=False)
+            tts.save(output_path)
+        
+        # Blocking call ko thread mein run karo
+        await loop.run_in_executor(None, generate)
     
     # ─────────────────────────────────────────
     # 5. Video + Voice Sync karo
