@@ -1099,7 +1099,13 @@ class MangaProcessor:
             alpha = max(0.0, min(1.0, alpha))
             return (intro_arr * alpha).astype(np.uint8)
 
-        return VideoClip(make_intro_frame, duration=duration)
+        video = VideoClip(make_intro_frame, duration=duration)
+
+        # Silent audio track attach karo — bina iske ffmpeg concat mein
+        # audio stream mismatch hoti hai aur final video mein voice nahi aata
+        silent_arr = np.zeros((int(44100 * duration), 2), dtype=np.float32)
+        silent_audio = AudioArrayClip(silent_arr, fps=44100).set_duration(duration)
+        return video.set_audio(silent_audio)
 
 
     # ─────────────────────────────────────────
@@ -1130,6 +1136,7 @@ class MangaProcessor:
                                         voice: str = "hi-female",
                                         bgm_enabled: bool = True,
                                         bgm_volume: int = 30,
+                                        story_title: str = "Manga Story",
                                         progress_callback=None) -> str:
         """
         image_paths: har panel ki image path
@@ -1147,7 +1154,6 @@ class MangaProcessor:
         part_paths = []
 
         # ── Step 0: Intro title screen (optional) ──
-        story_title = getattr(self, '_current_story_title', None) or "Manga Story"
         intro_part_path = None
         try:
             intro_clip = self._make_intro_clip(story_title, duration=3.0)
@@ -1193,8 +1199,8 @@ class MangaProcessor:
                         p,
                         fps=24,
                         codec='libx264',
-                        audio_codec='aac',
-                        temp_audiofile=pa,
+                        audio_codec='aac' if c.audio is not None else None,
+                        temp_audiofile=pa if c.audio is not None else None,
                         remove_temp=True,
                         threads=2,
                         preset='ultrafast',
@@ -1286,7 +1292,8 @@ class MangaProcessor:
                     cmd_concat = [
                         'ffmpeg', '-y', '-f', 'concat', '-safe', '0',
                         '-i', concat_list_path,
-                        '-c', 'copy',
+                        '-c:v', 'copy',        # video stream copy — fast
+                        '-c:a', 'aac', '-b:a', '128k',  # audio re-encode — consistent stream
                         merged_path
                     ]
                     subprocess.run(cmd_concat, check=True,
@@ -1297,7 +1304,7 @@ class MangaProcessor:
                     vol = max(0, min(100, bgm_volume)) / 100.0
                     audio_filter = (
                         f"[0:a]aformat=fltp,volume=1.0[main];"
-                        f"[1:a]aformat=fltp,volume={vol:.2f},aloop=0:size=2e+09:start=0[bgm];"
+                        f"[1:a]aformat=fltp,volume={vol:.2f},aloop=loop=-1:size=2e+09[bgm];"
                         f"[main][bgm]amix=inputs=2:duration=first:dropout_transition=2[aout]"
                     )
                     cmd_parts = [
@@ -1318,17 +1325,18 @@ class MangaProcessor:
                     logger.info("BGM mix ho gayi")
 
                 else:
-                    # No BGM — direct concat + optional scale
+                    # No BGM — direct concat + re-encode (never -c copy: audio
+                    # stream mismatch hoti hai intro + panel clips ke beech)
                     cmd = [
                         'ffmpeg', '-y', '-f', 'concat', '-safe', '0',
                         '-i', concat_list_path,
                     ]
                     if vf_filter:
-                        cmd += ['-vf', vf_filter,
-                                '-c:v', 'libx264', '-preset', 'ultrafast',
-                                '-c:a', 'aac']
-                    else:
-                        cmd += ['-c', 'copy']
+                        cmd += ['-vf', vf_filter]
+                    cmd += [
+                        '-c:v', 'libx264', '-preset', 'ultrafast',
+                        '-c:a', 'aac', '-b:a', '128k',
+                    ]
                     cmd.append(output_path)
                     subprocess.run(cmd, check=True, capture_output=True)
 
