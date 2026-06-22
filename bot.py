@@ -351,8 +351,16 @@ async def process_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE,
             parse_mode='Markdown'
         )
         panel_beats = []
-        for i, img_path in enumerate(cleaned_images):
-            beats = await processor.generate_panel_script(img_path)
+        story_context = ""
+        # IMPORTANT: script hamesha ORIGINAL image (image_paths) se generate
+        # hota hai, kyunki agar text_removal ON hai to cleaned_images mein
+        # dialogue mit chuka hota hai — Gemini ko dialogue padhne ke liye
+        # original text-wali image chahiye. cleaned_images sirf VIDEO mein
+        # dikhane ke liye use hoti hai.
+        for i, orig_path in enumerate(image_paths):
+            beats, story_context = await processor.generate_panel_script(
+                orig_path, story_context=story_context
+            )
             panel_beats.append(beats)
             if (i + 1) % 2 == 0 or (i + 1) == len(cleaned_images):
                 try:

@@ -43,14 +43,17 @@ class MangaProcessor:
     # 1. PDF → Images
     # ─────────────────────────────────────────
     def pdf_to_images(self, pdf_path: str) -> list:
-        pages = convert_from_path(pdf_path, dpi=150)
+        # DPI 200+ aur high JPEG quality — taaki speech-bubble ka chhota text
+        # bhi Gemini ko clearly dikhe (150dpi/q85 par fine text blur ho jaata
+        # hai aur Gemini text padh nahi paata, fallback pe chala jaata hai)
+        pages = convert_from_path(pdf_path, dpi=220)
         image_paths = []
         for i, page in enumerate(pages):
             tmp = tempfile.NamedTemporaryFile(suffix=f'_page{i}.jpg', delete=False)
-            page.save(tmp.name, 'JPEG', quality=85)
+            page.save(tmp.name, 'JPEG', quality=95)
             image_paths.append(tmp.name)
             self.temp_files.append(tmp.name)
-        logger.info(f"PDF se {len(image_paths)} pages nikale")
+        logger.info(f"PDF se {len(image_paths)} pages nikale (220dpi, q95)")
         return image_paths
 
     # ─────────────────────────────────────────
@@ -144,48 +147,66 @@ class MangaProcessor:
             {"text": "Yeh panel yahan khatam hota hai.", "position": 90},
         ]
 
-    async def generate_panel_script(self, image_path: str) -> list:
+    async def generate_panel_script(self, image_path: str, story_context: str = "") -> tuple:
+        """
+        story_context: ab tak ki kahani ka short summary (character names,
+        jo ho chuka hai) — pichle panels se carry hota hai, taaki Gemini
+        YouTube-style continuity rakh sake ("Nancy ne kaha...", "Tabhi
+        vampire boy bola...") instead of generic "ladki ne kaha".
+
+        Returns: (beats_list, updated_story_context)
+        """
         try:
             with open(image_path, 'rb') as f:
                 img_bytes = f.read()
         except Exception as e:
             logger.warning(f"Image read error ({image_path}): {e}")
-            return self._make_fallback_beats()
+            return self._make_fallback_beats(), story_context
+
+        context_block = (
+            f"📖 AB TAK KI KAHANI (pichle panels se):\n{story_context}\n\n"
+            if story_context.strip() else
+            "📖 Yeh PEHLA panel hai is comic ka — koi pichla context nahi hai.\n\n"
+        )
 
         prompt = (
-            "Tu ek professional Hindi manga/comic EXPLAINER hai — jaise koi "
-            "YouTuber manga explain karta hai, story ko engaging banake.\n\n"
-            "Is panel (ek manga/comic page) ko dhyaan se dekh:\n"
-            "- Speech bubbles, captions, sound-effects ka text padh — "
-            "IMPORTANT: yeh text KISI BHI language mein ho sakta hai "
-            "(English, Italian, Japanese, Korean, Spanish, ya koi aur "
-            "bhasha) — jo bhi language ho, uska meaning samajh aur Hindi/ "
-            "Hinglish mein convert kar. Kabhi bhi 'samajh nahi aaya' ya "
-            "generic placeholder mat de — agar text chhota/unclear lage "
-            "to bhi best-effort translate kar uska matlab nikaal ke\n"
-            "- Characters ki facial expression, body language, background, "
-            "scene ka mood bhi observe kar\n"
-            "- Yeh sab milake ek natural Hindi/Hinglish explainer narration "
-            "bana — jo dialogue ko bhi cover kare AUR jo dikh raha hai uska "
-            "context/emotion bhi bataye (jaise 'Wo darr ke peeche dekhti hai "
-            "aur kehti hai - Strange, meri mummy ne iske bare mein kabhi nahi "
-            "bola tha')\n"
-            "- Dialogue ka exact meaning mat badalna, bas use natural "
-            "explainer flow mein pirona hai\n"
-            "- Agar panel mein bilkul koi text/bubble nahi hai (sirf pure "
-            "art/scene hai), tabhi sirf scene-description de — warna hamesha "
-            "panel ke andar jo likha hai usi se shuru kar\n\n"
-            "Panel ko TOP se BOTTOM tak alag-alag 'beats' mein todo — har "
-            "beat ek chhota narration-chunk hai jo panel ke ek specific "
-            "vertical hisse (top/middle/bottom ya in between) se related hai. "
-            "Agar panel mein 2 bubbles hain (ek upar, ek niche), to kam se "
-            "kam 2 beats banao. Agar sirf scene/art hai (bubble nahi), to "
-            "1-2 beats mein scene describe kar.\n\n"
-            "Har beat ke liye 'position' do — 0 se 100 ke beech ek number, "
-            "jo batata hai panel ke kis vertical %% (0=sabse upar, "
-            "100=sabse niche) par yeh beat ka content hai.\n\n"
-            "Sirf JSON array return karo, kuch aur nahi:\n"
-            '[{"position": 10, "text": "..."}, {"position": 70, "text": "..."}]'
+            "Tu ek POPULAR YouTube manga/comic EXPLAINER channel ka host hai "
+            "(jaise 'Anime Sasta', 'Manga Villain' jaise channels) — jo "
+            "story ko engaging, dramatic Hindi/Hinglish style mein sunata "
+            "hai, character names use karke, jaise koi kahani sunayi jaa "
+            "rahi ho.\n\n"
+            + context_block +
+            "Ab is NAYE panel ko dhyaan se dekh aur kahani aage badhao:\n\n"
+            "RULES:\n"
+            "1. Speech bubbles/captions/sound-effects ka text padh — yeh "
+            "KISI BHI language mein ho sakta hai (English, Italian, "
+            "Japanese, Korean, etc.) — uska meaning samajh aur Hindi/"
+            "Hinglish explainer-style mein convert kar. Kabhi 'samajh nahi "
+            "aaya' mat bol, best-effort translate kar.\n"
+            "2. Character ka NAAM pata chal jaaye (text se ya pichle context "
+            "se) to naam se refer kar ('Nancy ne kaha', 'Vampire boy ne "
+            "muskura ke jawab diya') — generic 'ladki' ya 'ladka' avoid kar "
+            "jab tak naam na pata ho.\n"
+            "3. Sirf dialogue translate mat kar — characters ki facial "
+            "expression, body language, scene ka mood, background bhi "
+            "dekh aur natural storytelling mein pirona ('Nancy darr ke "
+            "peeche dekhti hai aur kehti hai - ...').\n"
+            "4. YouTube-explainer ka energy rakh — thoda suspense/drama "
+            "build kar jahan scene mein tension ho, lekin dialogue ka exact "
+            "meaning mat badalna.\n"
+            "5. Agar panel mein bilkul koi text/bubble nahi hai (sirf art "
+            "hai), to scene ko dramatically describe kar — generic 'scene "
+            "aage badhta hai' jaisi khaali line KABHI mat de.\n\n"
+            "Panel ko TOP se BOTTOM tak 'beats' mein todo — har beat ek "
+            "chhota narration-chunk hai jo panel ke specific vertical hisse "
+            "se related hai. 2 bubbles (upar-niche) hain to kam se kam 2 "
+            "beats banao.\n\n"
+            "Har beat ke liye 'position' do (0=top, 100=bottom panel mein).\n\n"
+            "Sirf JSON object return karo, kuch aur nahi, is exact format mein:\n"
+            '{"beats": [{"position": 10, "text": "..."}, {"position": 70, "text": "..."}], '
+            '"updated_context": "ek chhota (2-3 sentence) summary jo ab tak '
+            'ki kahani capture kare — character names, important events — '
+            'jo NEXT panel ke liye yaad rakhna zaroori hai"}'
         )
 
         content_parts = [
@@ -215,9 +236,6 @@ class MangaProcessor:
                 candidate = response.candidates[0]
                 finish_reason = getattr(candidate, 'finish_reason', None)
                 finish_str = str(finish_reason) if finish_reason is not None else ""
-                # finish_reason==1 ya 'STOP' matlab normal completion. Kuch
-                # bhi aur (SAFETY=3, RECITATION=4, MAX_TOKENS=2, etc.) means
-                # response truncated/blocked tha.
                 if finish_str and not any(s in finish_str.upper() for s in ('STOP', '1')):
                     raise ValueError(f"Gemini finish_reason: {finish_str} (safety/length block ho sakta hai)")
 
@@ -228,9 +246,15 @@ class MangaProcessor:
                 elif '```' in text:
                     text = text.split('```')[1].split('```')[0].strip()
 
-                beats_data = json.loads(text)
+                parsed = json.loads(text)
+                if not isinstance(parsed, dict):
+                    raise ValueError("Response dict nahi hai")
+
+                beats_data = parsed.get("beats", [])
+                new_context = (parsed.get("updated_context") or "").strip()
+
                 if not isinstance(beats_data, list) or len(beats_data) == 0:
-                    raise ValueError("Empty/invalid JSON from Gemini")
+                    raise ValueError("Empty/invalid beats from Gemini")
 
                 beats = []
                 for item in beats_data:
@@ -247,10 +271,14 @@ class MangaProcessor:
                 if not beats:
                     raise ValueError("Saare beats empty nikle")
 
-                # Position ke hisaab se sort karo (top-to-bottom reading order)
                 beats.sort(key=lambda b: b["position"])
-                logger.info(f"Panel se {len(beats)} beats mile")
-                return beats
+
+                # Agar Gemini ne context nahi diya, purana hi carry karo
+                if not new_context:
+                    new_context = story_context
+
+                logger.info(f"Panel se {len(beats)} beats mile, context updated")
+                return beats, new_context
 
             except Exception as e:
                 err_str = str(e)
@@ -271,7 +299,7 @@ class MangaProcessor:
                     break
 
         logger.info("Fallback beats use kar raha hoon is panel ke liye")
-        return self._make_fallback_beats()
+        return self._make_fallback_beats(), story_context
 
     # ─────────────────────────────────────────
     # 4. gTTS Audio
