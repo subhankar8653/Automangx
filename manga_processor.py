@@ -202,7 +202,9 @@ class MangaProcessor:
     # taaki genuine minimalist-style manga panels (jo legitimately safed
     # background use karte hain par real character/art bhi hota hai)
     # galti se skip na ho jaayein — sirf EXTREME cases catch karte hain.
-    BLANK_PANEL_WHITE_RATIO = 0.97
+    # 0.90 rakha hai — text-only panels (white bg + bold text) ~92-95% white
+    # hote hain, genuine art panels mein usually <85% white hota hai.
+    BLANK_PANEL_WHITE_RATIO = 0.90
 
     def is_blank_panel(self, img_path: str) -> bool:
         try:
@@ -937,35 +939,59 @@ class MangaProcessor:
 
         # ── Step 4: Scroll-position-at-time function ──
         def get_y_at_time(t):
-            if scroll_range <= 0:
-                return 0  # panel chhota hai, scroll ki zaroorat nahi
-            # Dhoondo kaunsa beat is waqt active hai
-            for seg in timeline:
-                if seg["start"] <= t <= seg["end"] or seg is timeline[-1]:
-                    # Pichle beat ki position se is beat ki position tak
-                    # smoothly move karo (transition ka time = 0.4s max)
-                    transition_time = min(0.4, (seg["end"] - seg["start"]) * 0.3)
-                    if t <= seg["start"] + transition_time and seg != timeline[0]:
-                        prev_idx = timeline.index(seg) - 1
-                        prev_y = timeline[prev_idx]["y"] if prev_idx >= 0 else seg["y"]
-                        progress = (t - seg["start"]) / transition_time if transition_time > 0 else 1
-                        progress = max(0, min(1, progress))
-                        return int(prev_y + (seg["y"] - prev_y) * progress)
-                    return seg["y"]
-            return timeline[-1]["y"] if timeline else 0
+            if scroll_range <= 0 or not timeline:
+                return 0
+            # t se pehle ya exact match karne wala segment dhoondo
+            # (index track karte hain taaki prev_y accurate mile)
+            active_idx = len(timeline) - 1  # default: last segment
+            for i, seg in enumerate(timeline):
+                if t <= seg["end"]:
+                    active_idx = i
+                    break
+            seg = timeline[active_idx]
+            seg_dur = seg["end"] - seg["start"]
+            # Smooth scroll: pichli position se is position tak 30% duration mein
+            transition_time = min(0.4, seg_dur * 0.3) if seg_dur > 0 else 0
+            if active_idx > 0 and transition_time > 0 and t < seg["start"] + transition_time:
+                prev_y = timeline[active_idx - 1]["y"]
+                progress = (t - seg["start"]) / transition_time
+                progress = max(0.0, min(1.0, progress))
+                # Ease-out cubic: fast start, slow finish — natural feel
+                progress = 1 - (1 - progress) ** 3
+                return int(prev_y + (seg["y"] - prev_y) * progress)
+            return seg["y"]
 
         # ── Step 5: Frame-generator function (moviepy VideoClip ke liye) ──
         if scroll_range <= 0:
-            # Chhota panel — halka cinematic zoom (1.0 -> 1.08 scale over duration)
-            base_canvas = np.zeros((CANVAS_H, CANVAS_W, 3), dtype=np.uint8)
-            y_off = (CANVAS_H - scaled_h) // 2
-            base_canvas[y_off:y_off + scaled_h, 0:CANVAS_W] = panel_rgb
+            # Chhota panel (height < CANVAS_H) — CANVAS_H tak scale-up karo
+            # taaki black bars na dikhe. Aspect ratio maintain karte hue
+            # width fit karo, aur gentle zoom-in animation dete hain.
+            scale_up = CANVAS_H / max(scaled_h, 1)
+            up_h = CANVAS_H
+            up_w = max(1, int(CANVAS_W * scale_up))
+            # Agar scale_up > 1: panel chota tha, bada kar rahe hain
+            # Agar scale_up <= 1: panel already CANVAS_H ke barabar ya bada
+            panel_up = cv2.resize(panel_rgb, (up_w, up_h))
+
+            # x-center: agar up_w > CANVAS_W to center crop, warna letterbox
+            if up_w >= CANVAS_W:
+                x_off = (up_w - CANVAS_W) // 2
+                base_frame = panel_up[:, x_off:x_off + CANVAS_W]
+            else:
+                base_frame = np.zeros((CANVAS_H, CANVAS_W, 3), dtype=np.uint8)
+                x_pad = (CANVAS_W - up_w) // 2
+                base_frame[:, x_pad:x_pad + up_w] = panel_up
 
             def make_frame(t):
-                zoom = 1.0 + 0.08 * (t / max(actual_duration, 0.01))
-                zh, zw = int(CANVAS_H * zoom), int(CANVAS_W * zoom)
-                zoomed = cv2.resize(base_canvas, (zw, zh))
-                cx, cy = (zw - CANVAS_W) // 2, (zh - CANVAS_H) // 2
+                # Gentle 4% zoom-in over entire clip duration
+                zoom = 1.0 + 0.04 * (t / max(actual_duration, 0.01))
+                if abs(zoom - 1.0) < 0.001:
+                    return base_frame
+                zh = int(CANVAS_H * zoom)
+                zw = int(CANVAS_W * zoom)
+                zoomed = cv2.resize(base_frame, (zw, zh))
+                cy = (zh - CANVAS_H) // 2
+                cx = (zw - CANVAS_W) // 2
                 return zoomed[cy:cy + CANVAS_H, cx:cx + CANVAS_W]
         else:
             def make_frame(t):
