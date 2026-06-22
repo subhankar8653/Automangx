@@ -15,7 +15,7 @@ from google import genai
 from google.genai import types
 from gtts import gTTS
 from moviepy.editor import (
-    ImageClip, AudioClip, AudioFileClip, concatenate_videoclips, concatenate_audioclips,
+    ImageClip, AudioClip, AudioFileClip, AudioArrayClip, concatenate_videoclips, concatenate_audioclips,
     CompositeAudioClip, CompositeVideoClip, VideoClip, VideoFileClip, afx
 )
 from pdf2image import convert_from_path
@@ -416,7 +416,12 @@ class MangaProcessor:
         # Total attempts = min(3, number_of_keys * 2) — taaki multiple keys
         # ke saath zyada chances milein bina infinite loop ke
         max_attempts = min(3 * len(GEMINI_API_KEYS), max(3, len(GEMINI_API_KEYS) * 2))
+        # +len(keys) extra attempts taaki ek RPM-cooldown round ke baad bhi
+        # poora ek round retry karne ka chance mile (warna cooldown ka fayda
+        # nahi milta kyunki attempts already khatam ho jaate)
+        max_attempts += len(GEMINI_API_KEYS)
         last_429_key = None   # 429 dene wali key ko next attempt mein avoid karo
+        rate_limit_streak = 0  # consecutive 429s is round mein — sab keys cycle hue ya nahi, track karne ke liye
 
         for attempt in range(1, max_attempts + 1):
             # Best key choose karo — jo sabse zyada rest kar chuki ho
@@ -503,10 +508,26 @@ class MangaProcessor:
 
                 if is_rate_limit:
                     last_429_key = key_idx  # next attempt mein yeh key avoid karo
+                    rate_limit_streak += 1
                     if len(GEMINI_API_KEYS) > 1:
-                        # Doosri key available hai — turant switch, no 65s wait
-                        logger.info(f"Key {key_idx+1} rate-limited — dusri key pe switch kar raha hoon...")
-                        await asyncio.sleep(1)   # tiny buffer only
+                        # Agar abhi tak saari keys ek hi round mein 429 nahi de chuki,
+                        # turant doosri key try karo (chhota buffer).
+                        # Agar pure round (saari keys) fail ho gaya, iska matlab
+                        # RPM (per-minute) limit trip hui hai, keys "khatam" nahi
+                        # hui — proper cooldown karo, fallback pe jaane se pehle.
+                        if rate_limit_streak < len(GEMINI_API_KEYS):
+                            logger.info(f"Key {key_idx+1} rate-limited — dusri key pe switch kar raha hoon...")
+                            await asyncio.sleep(1)
+                        else:
+                            wait_time = 22
+                            m = re.search(r'seconds:\s*(\d+)', err_str)
+                            if m:
+                                wait_time = int(m.group(1)) + 5
+                            logger.info(f"Saari {len(GEMINI_API_KEYS)} keys ek round mein rate-limited — "
+                                        f"RPM cooldown {wait_time}s, fallback se pehle retry...")
+                            await asyncio.sleep(wait_time)
+                            rate_limit_streak = 0
+                            last_429_key = None
                     else:
                         # Sirf 1 key hai — purana 65s wait fallback
                         wait_time = 65
@@ -601,7 +622,9 @@ class MangaProcessor:
         )
 
         max_attempts = min(3 * len(GEMINI_API_KEYS), max(3, len(GEMINI_API_KEYS) * 2))
+        max_attempts += len(GEMINI_API_KEYS)  # ek RPM-cooldown round ke baad retry ka chance
         last_429_key = None
+        rate_limit_streak = 0
         ctx = story_context
 
         for attempt in range(1, max_attempts + 1):
@@ -680,9 +703,21 @@ class MangaProcessor:
 
                 if is_rate_limit:
                     last_429_key = key_idx
+                    rate_limit_streak += 1
                     if len(GEMINI_API_KEYS) > 1:
-                        logger.info(f"Batch key {key_idx+1} rate-limited — switch kar raha hoon...")
-                        await asyncio.sleep(1)
+                        if rate_limit_streak < len(GEMINI_API_KEYS):
+                            logger.info(f"Batch key {key_idx+1} rate-limited — switch kar raha hoon...")
+                            await asyncio.sleep(1)
+                        else:
+                            wait_time = 22
+                            m = re.search(r'seconds:\s*(\d+)', err_str)
+                            if m:
+                                wait_time = int(m.group(1)) + 5
+                            logger.info(f"Batch: saari {len(GEMINI_API_KEYS)} keys ek round mein "
+                                        f"rate-limited — RPM cooldown {wait_time}s...")
+                            await asyncio.sleep(wait_time)
+                            rate_limit_streak = 0
+                            last_429_key = None
                     else:
                         wait_time = 65
                         m = re.search(r'seconds:\s*(\d+)', err_str)
