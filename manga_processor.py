@@ -61,7 +61,7 @@ DEFAULT_BGM_PATH = os.path.join(
 
 IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.webp', '.bmp')
 
-CANVAS_W, CANVAS_H = 720, 1280  # 9:16 vertical canvas (Shorts/Reels style)
+CANVAS_W, CANVAS_H = 1280, 720  # 16:9 landscape canvas (YouTube style)
 
 
 class MangaProcessor:
@@ -755,15 +755,25 @@ class MangaProcessor:
     # ─────────────────────────────────────────
     def _load_scaled_panel(self, img_path: str):
         """
-        9:16 Shorts/Reels style rendering:
-        - Foreground: panel ko canvas width (720) fit karo, aspect maintain
-        - Background: same panel ko gaussian blur ke saath full 720x1280 fill karo
+        16:9 YouTube landscape rendering:
+        - Vertical manga panel ko landscape canvas (1280x720) mein dikhana hai
+        - Strategy: panel ki WIDTH ko canvas ke ek portion mein fit karo (centered),
+          baaki sides mein blurred background fill karo
+        - Panel ki scaled height CANVAS_H se zyada hogi (tall panels) —
+          yahi scroll_range deta hai (top se bottom tak scroll)
         - Returns: (fg_rgb, bg_rgb, fg_h)
-          fg_rgb = foreground panel (720 wide, proportional height)
-          bg_rgb = blurred background (720x1280 full canvas)
+          fg_rgb = foreground panel (panel_display_w wide, proportional height)
+          bg_rgb = blurred background (1280x720 full canvas)
           fg_h   = foreground panel height (scroll range ke liye)
+          panel_display_w = foreground panel ki actual width (canvas center mein)
 
-        Memory cap: webtoon-style extra-tall panels ko 5000px pe clamp karo.
+        Memory cap: extra-tall panels ko 8000px pe clamp karo.
+
+        Landscape mein manga panel ka optimum width:
+        - Square panels (aspect ~1:1): CANVAS_H tak height fit karo — no scroll needed
+        - Tall panels (h > w): panel ko CANVAS_H ki ~95% height se fit karo as starting
+          point, phir scroll se baaki dikhao. Width = CANVAS_H * (w/h), centered.
+        - Agar panel width > CANVAS_W: width = CANVAS_W, height proportional (tall scroll)
         """
         img = cv2.imread(img_path)
         if img is None:
@@ -771,26 +781,46 @@ class MangaProcessor:
             return blank, blank, CANVAS_H
 
         h, w = img.shape[:2]
+        aspect = w / h  # < 1 for tall vertical panels, > 1 for wide panels
 
-        # ── Foreground: width = CANVAS_W, height proportional ──
-        fg_scale = CANVAS_W / w
-        fg_h = max(1, int(h * fg_scale))
-
-        MAX_PANEL_H = 5000
-        if fg_h > MAX_PANEL_H:
-            extra = MAX_PANEL_H / fg_h
-            fg_h = MAX_PANEL_H
-            fg_w = max(1, int(CANVAS_W * extra))
-            fg_resized = cv2.resize(img, (fg_w, fg_h))
-            fg_rgb = np.zeros((fg_h, CANVAS_W, 3), dtype=np.uint8)
-            x_off = (CANVAS_W - fg_w) // 2
-            fg_rgb[:, x_off:x_off + fg_w] = cv2.cvtColor(fg_resized, cv2.COLOR_BGR2RGB)
-            logger.warning(f"Panel capped: {h}px -> {fg_h}px")
+        # ── Foreground panel sizing ──
+        # Tall manga panels (aspect < 1): width ko canvas width ke max 60% tak rakho
+        # taaki sides mein blurred bg visible rahe aur cinematic lage.
+        # Agar panel bahut wide hai (aspect >= 1): CANVAS_W mein fit karo.
+        if aspect >= 1.0:
+            # Wide/square panel — width = canvas width
+            fg_w = CANVAS_W
+            fg_h = max(1, int(CANVAS_W / aspect))
         else:
-            fg_resized = cv2.resize(img, (CANVAS_W, fg_h))
-            fg_rgb = cv2.cvtColor(fg_resized, cv2.COLOR_BGR2RGB)
+            # Tall vertical manga panel — isko landscape canvas ke center mein
+            # display karo. Max width = 55% of CANVAS_W taaki dono sides pe
+            # blurred background ka "letterbox" effect mile.
+            # Height: panel ko CANVAS_H se scale karo — agar scaled height >
+            # CANVAS_H tab scroll hoga (jo scroll effect deta hai)
+            max_fg_w = int(CANVAS_W * 0.55)
+            # Height-based scale: agar pure CANVAS_H fit karen to fg_w kitna hoga?
+            h_based_w = max(1, int(CANVAS_H * aspect))
+            if h_based_w <= max_fg_w:
+                # Panel CANVAS_H mein fit ho jaata hai — use karo (no scroll ya minimal)
+                fg_w = h_based_w
+                fg_h = CANVAS_H
+            else:
+                # Panel bahut tall hai — width = max_fg_w, height proportional
+                # (CANVAS_H se zyada hogi, yahi scroll_range dega)
+                fg_w = max_fg_w
+                fg_h = max(1, int(fg_w / aspect))
 
-        # ── Background: cover-fill 720x1280, then heavy blur ──
+        MAX_PANEL_H = 8000
+        if fg_h > MAX_PANEL_H:
+            scale_down = MAX_PANEL_H / fg_h
+            fg_h = MAX_PANEL_H
+            fg_w = max(1, int(fg_w * scale_down))
+            logger.warning(f"Panel capped: original {h}px -> {fg_h}px")
+
+        fg_resized = cv2.resize(img, (fg_w, fg_h))
+        fg_rgb = cv2.cvtColor(fg_resized, cv2.COLOR_BGR2RGB)
+
+        # ── Background: cover-fill 1280x720, then heavy blur + darken ──
         bg_scale = max(CANVAS_W / w, CANVAS_H / h)
         bg_w = max(1, int(w * bg_scale))
         bg_h_raw = max(1, int(h * bg_scale))
@@ -800,7 +830,7 @@ class MangaProcessor:
         bg_crop = bg_resized[cy:cy + CANVAS_H, cx:cx + CANVAS_W]
         blur_k = 71  # must be odd
         bg_blurred = cv2.GaussianBlur(bg_crop, (blur_k, blur_k), 0)
-        bg_blurred = (bg_blurred * 0.45).clip(0, 255).astype(np.uint8)
+        bg_blurred = (bg_blurred * 0.40).clip(0, 255).astype(np.uint8)
         bg_rgb = cv2.cvtColor(bg_blurred, cv2.COLOR_BGR2RGB)
 
         return fg_rgb, bg_rgb, fg_h
@@ -965,17 +995,27 @@ class MangaProcessor:
         #   - Ken Burns: gentle 5% zoom-in over clip duration
 
         def _composite_frame(fg_crop, bg_frame):
-            """fg_crop ko bg_frame ke upar center mein baith ke composite karo."""
+            """
+            Landscape canvas mein fg panel ko center mein rakho:
+            - Horizontally: center (left-right blurred bg visible)
+            - Vertically: center (agar panel CANVAS_H se chhota hai)
+            """
             frame = bg_frame.copy()
             fh, fw = fg_crop.shape[:2]
-            # fg ko canvas ke center mein rakho (vertically bhi center)
-            y_off = max(0, (CANVAS_H - fh) // 2)
+
+            # Horizontal center
             x_off = max(0, (CANVAS_W - fw) // 2)
-            y_end = min(CANVAS_H, y_off + fh)
             x_end = min(CANVAS_W, x_off + fw)
+
+            # Vertical center (for short panels; scroll panels fill full height)
+            y_off = max(0, (CANVAS_H - fh) // 2)
+            y_end = min(CANVAS_H, y_off + fh)
+
             fg_h_use = y_end - y_off
             fg_w_use = x_end - x_off
-            frame[y_off:y_end, x_off:x_end] = fg_crop[:fg_h_use, :fg_w_use]
+
+            if fg_h_use > 0 and fg_w_use > 0:
+                frame[y_off:y_end, x_off:x_end] = fg_crop[:fg_h_use, :fg_w_use]
             return frame
 
         def _ken_burns(source_frame, t, dur, zoom_max=0.05):
@@ -994,34 +1034,22 @@ class MangaProcessor:
             return zoomed[cy:cy + sh, cx:cx + sw]
 
         if scroll_range <= 0:
-            # Chhota panel — full CANVAS_H tak scale-up karo, center mein rakho
-            scale_up = CANVAS_H / max(fg_h, 1)
-            up_h = CANVAS_H
-            up_w = max(1, int(CANVAS_W * scale_up))
-            panel_up = cv2.resize(fg_rgb, (up_w, up_h))
-
-            if up_w >= CANVAS_W:
-                x_off = (up_w - CANVAS_W) // 2
-                base_fg = panel_up[:, x_off:x_off + CANVAS_W]
-            else:
-                base_fg = np.zeros((CANVAS_H, CANVAS_W, 3), dtype=np.uint8)
-                x_pad = (CANVAS_W - up_w) // 2
-                base_fg[:, x_pad:x_pad + up_w] = panel_up
-
+            # Chhota/square panel — CANVAS_H mein fit hai already, center mein rakho
+            # Landscape mein: fg panel center mein, sides pe blurred bg
             def make_frame(t):
-                # Ken Burns on full-canvas composite
-                composite = _composite_frame(base_fg, bg_rgb)
-                return _ken_burns(composite, t, actual_duration, zoom_max=0.05)
+                composite = _composite_frame(fg_rgb, bg_rgb)
+                return _ken_burns(composite, t, actual_duration, zoom_max=0.04)
         else:
+            # Tall panel — upar se neeche scroll karo (landscape canvas ke center mein)
             def make_frame(t):
                 y = get_y_at_time(t)
                 y = max(0, min(scroll_range, y))
-                # Visible slice of fg panel
-                fg_slice = fg_rgb[y:y + CANVAS_H, 0:CANVAS_W]
-                # Composite on blurred bg
+                # fg_rgb ka vertical slice — CANVAS_H pixels (jo landscape frame ki height hai)
+                fg_slice_h = min(CANVAS_H, fg_rgb.shape[0] - y)
+                fg_slice = fg_rgb[y:y + fg_slice_h, 0:fg_rgb.shape[1]]
+                # Composite: fg ko bg ke upar center mein daalo
                 composite = _composite_frame(fg_slice, bg_rgb)
-                # Ken Burns on the composite
-                return _ken_burns(composite, t, actual_duration, zoom_max=0.03)
+                return _ken_burns(composite, t, actual_duration, zoom_max=0.02)
         video_clip = VideoClip(make_frame, duration=actual_duration)
         if audio_clip:
             video_clip = video_clip.set_audio(audio_clip)
@@ -1033,7 +1061,7 @@ class MangaProcessor:
     # ─────────────────────────────────────────
     def _make_intro_clip(self, title: str, duration: float = 3.0):
         """
-        720x1280 black intro screen jisme:
+        1280x720 landscape intro screen jisme:
         - Title text centered
         - Subtle gradient overlay
         Returns: moviepy VideoClip (no audio)
@@ -1269,8 +1297,8 @@ class MangaProcessor:
             # Quality scale: agar quality_height 720 se alag ho to scale karo
             vf_filter = ""
             if quality_height and quality_height != CANVAS_H:
-                # 9:16 vertical — width = quality_height * (9/16)
-                aspect = CANVAS_W / CANVAS_H  # 720/1280 = 0.5625
+                # 16:9 landscape — width = quality_height * (16/9)
+                aspect = CANVAS_W / CANVAS_H  # 1280/720 = 1.777...
                 new_w = int(quality_height * aspect)
                 new_w = new_w if new_w % 2 == 0 else new_w + 1
                 new_h = quality_height if quality_height % 2 == 0 else quality_height + 1
