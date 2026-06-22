@@ -124,22 +124,34 @@ class MangaProcessor:
         return cleaned_paths
 
     # ─────────────────────────────────────────
-    # 2b. Blur Effect (16:9 short-video style background)
+    # 2b. 16:9 Fit + Blur Background (YouTube-style canvas)
     # ─────────────────────────────────────────
     def apply_blur_background(self, image_paths: list, blur_strength: int) -> list:
         """
-        blur_strength: 0-100. 0 = no effect, original lautata hai.
-        Image ko 16:9 blurred-background canvas ke beech mein fit karta hai —
-        jaise short-video / reels style panels dikhte hain.
-        """
-        if not blur_strength or blur_strength <= 0:
-            return image_paths
+        Har panel ko 16:9 canvas ke beech mein center-fit karta hai, aspect
+        ratio maintain karke. Canvas ka background side-padding wala area
+        same image ke stretched+blurred version se fill hota hai (jaise
+        YouTube manga-video bots mein dikhta hai).
 
+        blur_strength: 0-100. Background blur ki intensity control karta hai.
+        0 par bhi 16:9 fitting hoti hai — bas background sharp (zero blur)
+        rehta hai. Yeh hamesha lagta hai, optional nahi hai, kyunki video ka
+        canvas hamesha 16:9 hona chahiye.
+        """
         result_paths = []
+
         # 0-100 ko kernel size mein convert (odd number chahiye OpenCV ko)
-        k = int(15 + (blur_strength / 100) * 70)
-        if k % 2 == 0:
-            k += 1
+        # blur_strength=0 par bhi minimal kernel (1) use hota hai — yaani
+        # effectively no blur, lekin same code-path se canvas banta hai.
+        blur_strength = max(0, min(100, blur_strength or 0))
+        if blur_strength == 0:
+            k = 1
+        else:
+            k = int(15 + (blur_strength / 100) * 70)
+            if k % 2 == 0:
+                k += 1
+
+        canvas_w, canvas_h = 1280, 720
 
         for img_path in image_paths:
             try:
@@ -149,11 +161,11 @@ class MangaProcessor:
                     continue
 
                 h, w = img.shape[:2]
-                canvas_w, canvas_h = 1280, 720
 
                 # Background: image ko canvas size tak stretch karke blur karo
                 bg = cv2.resize(img, (canvas_w, canvas_h))
-                bg = cv2.GaussianBlur(bg, (k, k), 0)
+                if k > 1:
+                    bg = cv2.GaussianBlur(bg, (k, k), 0)
                 # Thoda darken taaki foreground clearly dikhe
                 bg = cv2.convertScaleAbs(bg, alpha=0.6, beta=0)
 
@@ -166,15 +178,15 @@ class MangaProcessor:
                 y_off = (canvas_h - new_h) // 2
                 bg[y_off:y_off + new_h, x_off:x_off + new_w] = fg
 
-                tmp = tempfile.NamedTemporaryFile(suffix='_blur.jpg', delete=False)
+                tmp = tempfile.NamedTemporaryFile(suffix='_fit169.jpg', delete=False)
                 cv2.imwrite(tmp.name, bg, [cv2.IMWRITE_JPEG_QUALITY, 90])
                 result_paths.append(tmp.name)
                 self.temp_files.append(tmp.name)
             except Exception as e:
-                logger.warning(f"Blur error ({img_path}): {e} — original use kar raha hoon")
+                logger.warning(f"16:9 fit error ({img_path}): {e} — original use kar raha hoon")
                 result_paths.append(img_path)
 
-        logger.info(f"{len(result_paths)} images pe blur background lagaya (strength={blur_strength})")
+        logger.info(f"{len(result_paths)} images 16:9 canvas mein fit hui (blur={blur_strength})")
         return result_paths
 
 
@@ -182,16 +194,16 @@ class MangaProcessor:
 
         def make_fallback(paths):
             pool = [
-                "Dekho yaar, yahan kahani ek naye mod par aa jaati hai!",
-                "Aur phir ek dum se kuch aisa hua jo kisi ne soch bhi nahi tha.",
-                "Characters ke beech tension badh rahi hai — mahaul garam ho raha hai!",
-                "Yeh pal bahut important hai poori kahani mein.",
-                "Suspense aur drama apne peak par hai is page mein!",
-                "Ek dum se situation puri badal gayi — kya hoga aage?",
-                "Hero ki aankhon mein determination saaf dikh rahi hai.",
-                "Yahan se kahani ek nayi disha mein chali jaati hai.",
-                "Drama aur action ka perfect mix hai is page mein!",
-                "Aakhir mein sach saamne aa hi gaya — sabko hairani hui!",
+                "Is page mein scene aage badhta hai.",
+                "Yahan kuch important ho raha hai.",
+                "Tension is panel mein saaf dikh rahi hai.",
+                "Mahaul yahan dheere dheere badal raha hai.",
+                "Yeh moment kahani mein khaas hai.",
+                "Sannata chha gaya hai is panel mein.",
+                "Characters ki expression kuch kehna chahti hai.",
+                "Yahan se kahani naya rukh leti hai.",
+                "Page ka mahaul kuch alag hi hai.",
+                "Kuch unexpected hone wala hai is panel mein.",
             ]
             return [
                 {"image_index": i, "hindi_text": pool[i % len(pool)]}
@@ -212,13 +224,25 @@ class MangaProcessor:
             return make_fallback(image_paths)
 
         prompt = (
-            "Tu ek zabardast Hindi manga storyteller hai.\n"
-            "Yeh manga pages dekh aur har page ke liye compelling Hindi narration likh.\n\n"
-            "Rules:\n"
-            "- Natural Hindi bolchaal (jaise koi dost bata raha ho)\n"
-            "- Emotions dikhao — excitement, tension, drama!\n"
-            "- Har page 2-3 sentences\n"
-            "- 'Dekho', 'Yaar', 'Aur phir', 'Ek dum se' jaisi fillers use karo\n\n"
+            "Tu ek OCR aur dialogue-extraction expert hai.\n"
+            "Yeh manga/comic pages dekh — har page mein speech bubbles, "
+            "captions, aur sound-effect text hota hai.\n\n"
+            "Tera kaam:\n"
+            "- Har page ke saare speech bubbles/text ko UNKE ORIGINAL ORDER mein "
+            "(top-to-bottom, left-to-right jaisa padhne ka natural flow hota hai) "
+            "padh aur seedha extract kar — naya kuch mat likh, sirf jo likha hai "
+            "wahi nikaal\n"
+            "- Agar text already Hindi/Hinglish mein hai to wahi rakh\n"
+            "- Agar text pure English mein hai to natural Hindi/Hinglish mein "
+            "translate kar (jaise koi voice-over artist bolega) — meaning exactly "
+            "wahi rakhna, kuch add/remove mat karna\n"
+            "- Agar ek page pe multiple bubbles hain to sabko jodke ek hi narration "
+            "banao, comma ya naturally bolne wale pause se separate karke\n"
+            "- Agar page pe koi text/dialogue nahi hai (sirf art/scene hai) to ek "
+            "chhota neutral scene description Hindi mein de (jaise 'Sannata chha "
+            "gaya' ya page ke visual ke hisaab se)\n"
+            "- Sound effects (jaise 'Heh!', 'Wo kya h!!?') ko bhi unke tone ke "
+            "hisaab se expressively bol — mat skip karo\n\n"
             "Sirf JSON array return karo, kuch aur nahi:\n"
             '[{"page":1,"narration":"..."},{"page":2,"narration":"..."}]'
         )
@@ -248,7 +272,7 @@ class MangaProcessor:
                 for item in pages_data:
                     narration = (item.get("narration") or "").strip()
                     if not narration:
-                        narration = "Is page mein kahani aage badhti hai."
+                        narration = "Is page mein scene aage badhta hai."
                     idx = max(0, item.get("page", 1) - 1)
                     script_parts.append({"image_index": idx, "hindi_text": narration})
                     seen.add(idx)
@@ -258,7 +282,7 @@ class MangaProcessor:
                     if i not in seen:
                         script_parts.append({
                             "image_index": i,
-                            "hindi_text": "Is page mein kahani aage badhti hai."
+                            "hindi_text": "Is page mein scene aage badhta hai."
                         })
 
                 script_parts.sort(key=lambda x: x["image_index"])
@@ -326,7 +350,7 @@ class MangaProcessor:
 
             img_path = image_paths[idx]
             hindi_text = (item.get("hindi_text") or "").strip() or \
-                         "Is page mein kahani aage badhti hai."
+                         "Is page mein scene aage badhta hai."
 
             audio_path = None
             audio_clip = None

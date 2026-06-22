@@ -66,12 +66,14 @@ def build_settings_text(s: dict) -> str:
     bgm_status = f"ON ({s['bgm_volume']}%)" if s['bgm_enabled'] else "OFF"
     blur_status = f"{s['blur']}%" if s['blur'] > 0 else "OFF"
     voice_label = VOICE_OPTIONS.get(s['voice'], {}).get('label', s['voice'])
+    text_status = "Removed (clean panel)" if s.get('text_removal') else "Kept (original bubbles)"
     return (
         "⚙️ *YOUR CURRENT SETTINGS* ⚙️\n\n"
         f"🎥 Quality: `{s['quality']}`\n"
         f"🗣️ Voice: `{voice_label}`\n"
         f"🎵 BGM: `{bgm_status}`\n"
-        f"🌫️ Blur: `{blur_status}`\n\n"
+        f"🌫️ Blur: `{blur_status}`\n"
+        f"📝 Panel Text: `{text_status}`\n\n"
         "👇 Select option to change:"
     )
 
@@ -81,6 +83,7 @@ def build_settings_keyboard():
          InlineKeyboardButton("🗣️ Voice", callback_data="menu_voice")],
         [InlineKeyboardButton("🎵 BGM", callback_data="menu_bgm"),
          InlineKeyboardButton("🌫️ Blur", callback_data="menu_blur")],
+        [InlineKeyboardButton("📝 Panel Text", callback_data="menu_text_removal")],
         [InlineKeyboardButton("🔄 Reset to Default", callback_data="reset_settings")],
     ])
 
@@ -225,6 +228,34 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # ── Panel Text (text removal) submenu ──
+    if data == "menu_text_removal":
+        buttons = [
+            [InlineKeyboardButton("📝 Keep Text (original bubbles)", callback_data="set_textrm_off")],
+            [InlineKeyboardButton("🧹 Remove Text (clean panel)", callback_data="set_textrm_on")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="back_settings")],
+        ]
+        await query.edit_message_text(
+            "📝 *Panel text ka kya karna hai?*\n\n"
+            "_Keep_ — speech bubbles waisi hi dikhengi panel mein (jaisi original "
+            "manga mein hain)\n"
+            "_Remove_ — OpenCV se text/bubble clean karke hata diya jayega",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+        return
+
+    if data.startswith("set_textrm_"):
+        val = data.replace("set_textrm_", "")
+        await update_user_setting(user_id, "text_removal", val == "on")
+        s = await get_user_settings(user_id)
+        await query.edit_message_text(
+            "✅ Panel text setting updated!\n\n" + build_settings_text(s),
+            parse_mode='Markdown',
+            reply_markup=build_settings_keyboard()
+        )
+        return
+
 
 # ═════════════════════════════════════════
 # File handlers (image / pdf / zip)
@@ -328,32 +359,35 @@ async def process_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE,
             )
             image_paths = processor.zip_to_images(zip_path)
 
-        # Step 2: Remove text from panels
-        await status_msg.edit_text(
-            "🎬 *Video ban rahi hai...*\n\n"
-            "✅ Step 1/5: Images ready!\n"
-            "⏳ Step 2/5: Manga text hat raha hai...",
-            parse_mode='Markdown'
-        )
-        cleaned_images = processor.remove_text_from_images(image_paths)
+        # Step 2: Remove text from panels (settings ke hisaab se — optional)
+        if settings.get('text_removal'):
+            await status_msg.edit_text(
+                "🎬 *Video ban rahi hai...*\n\n"
+                "✅ Step 1/5: Images ready!\n"
+                "⏳ Step 2/5: Manga text hat raha hai...",
+                parse_mode='Markdown'
+            )
+            cleaned_images = processor.remove_text_from_images(image_paths)
+        else:
+            cleaned_images = list(image_paths)
 
-        # Step 3: Apply blur background (settings ke hisaab se)
+        # Step 3: 16:9 canvas mein fit + blur background (hamesha hota hai)
         await status_msg.edit_text(
             "🎬 *Video ban rahi hai...*\n\n"
             "✅ Step 1/5: Images ready!\n"
-            "✅ Step 2/5: Text hat gaya!\n"
-            "⏳ Step 3/5: Background effect laga raha hoon...",
+            "✅ Step 2/5: Panel text settings apply ho gayi!\n"
+            "⏳ Step 3/5: 16:9 canvas mein fit kar raha hoon...",
             parse_mode='Markdown'
         )
         styled_images = processor.apply_blur_background(cleaned_images, settings['blur'])
 
-        # Step 4: Generate Hindi explanation
+        # Step 4: Generate Hindi narration (panel ke dialogue se)
         await status_msg.edit_text(
             "🎬 *Video ban rahi hai...*\n\n"
             "✅ Step 1/5: Images ready!\n"
-            "✅ Step 2/5: Text hat gaya!\n"
-            "✅ Step 3/5: Background effect lag gaya!\n"
-            "⏳ Step 4/5: Hindi story likh raha hoon...",
+            "✅ Step 2/5: Panel text settings apply ho gayi!\n"
+            "✅ Step 3/5: 16:9 canvas mein fit ho gaya!\n"
+            "⏳ Step 4/5: Panel ka dialogue padh raha hoon...",
             parse_mode='Markdown'
         )
         hindi_script = await processor.generate_hindi_script(image_paths)
@@ -362,8 +396,8 @@ async def process_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await status_msg.edit_text(
             "🎬 *Video ban rahi hai...*\n\n"
             "✅ Step 1/5: Images ready!\n"
-            "✅ Step 2/5: Text hat gaya!\n"
-            "✅ Step 3/5: Background effect lag gaya!\n"
+            "✅ Step 2/5: Panel text settings apply ho gayi!\n"
+            "✅ Step 3/5: 16:9 canvas mein fit ho gaya!\n"
             "✅ Step 4/5: Script taiyar!\n"
             "⏳ Step 5/5: Voice, BGM aur video sync ho raha hai...",
             parse_mode='Markdown'
