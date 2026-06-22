@@ -380,19 +380,26 @@ async def process_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE,
         # dialogue mit chuka hota hai — Gemini ko dialogue padhne ke liye
         # original text-wali image chahiye. cleaned_images sirf VIDEO mein
         # dikhane ke liye use hoti hai.
-        for i, orig_path in enumerate(image_paths):
-            beats, story_context = await processor.generate_panel_script(
-                orig_path, story_context=story_context
+        #
+        # BATCH MODE: 2 panels ek Gemini call mein — calls aadhi ho jaati
+        # hain, free-tier (10 RPM) par kaafi faster processing hoti hai.
+        i = 0
+        while i < len(image_paths):
+            batch_paths = image_paths[i:i + 2]
+            beats_list, story_context = await processor.generate_panel_scripts_batch(
+                batch_paths, story_context=story_context
             )
-            panel_beats.append(beats)
-            if (i + 1) % 2 == 0 or (i + 1) == len(cleaned_images):
+            panel_beats.extend(beats_list)
+            i += 2
+            done_count = min(i, len(image_paths))
+            if done_count % 2 == 0 or done_count == len(cleaned_images):
                 try:
                     await status_msg.edit_text(
                         "🎬 *Video ban rahi hai...*\n\n"
                         "✅ Step 1/4: Images ready!\n"
                         "✅ Step 2/4: Panel text settings apply ho gayi!\n"
                         f"⏳ Step 3/4: Script likh raha hoon "
-                        f"({i + 1}/{len(cleaned_images)})...",
+                        f"({done_count}/{len(cleaned_images)})...",
                         parse_mode='Markdown'
                     )
                 except Exception:

@@ -22,8 +22,37 @@ from pdf2image import convert_from_path
 
 logger = logging.getLogger(__name__)
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_GEMINI_KEY_HERE")
-genai_client = genai.Client(api_key=GEMINI_API_KEY)
+# ── Multi-key rotation — Railway mein GEMINI_API_KEY_1 se _10 tak set karo ──
+# Ek hi key se 10 RPM free-tier limit bohot jaldi hit hoti hai. Multiple
+# alag Google accounts se keys banao (ai.google.dev) aur .env mein dalo.
+# Agar sirf purana GEMINI_API_KEY set hai (bina number ke), to woh bhi
+# fallback ke taur par use hoga.
+def _load_gemini_keys() -> list:
+    keys = []
+    # numbered keys: GEMINI_API_KEY_1 ... GEMINI_API_KEY_10
+    for i in range(1, 11):
+        k = os.environ.get(f"GEMINI_API_KEY_{i}", "").strip()
+        if k and k != "YOUR_GEMINI_KEY_HERE":
+            keys.append(k)
+    # unnumbered fallback
+    k = os.environ.get("GEMINI_API_KEY", "").strip()
+    if k and k != "YOUR_GEMINI_KEY_HERE" and k not in keys:
+        keys.append(k)
+    if not keys:
+        keys = ["YOUR_GEMINI_KEY_HERE"]   # dummy so app at least starts
+    return keys
+
+GEMINI_API_KEYS = _load_gemini_keys()
+# _current_key_idx is module-level so all MangaProcessor instances share it
+_current_key_idx = 0
+
+def _get_genai_client(key_idx: int = None):
+    """key_idx doge to us specific key ka client milega, else current one."""
+    idx = key_idx if key_idx is not None else _current_key_idx
+    idx = idx % len(GEMINI_API_KEYS)
+    return genai.Client(api_key=GEMINI_API_KEYS[idx])
+
+genai_client = _get_genai_client(0)   # backward-compat (batch path ke liye)
 
 # Default BGM track — isi folder mein assets/default_bgm.mp3 rakhna hai
 DEFAULT_BGM_PATH = os.path.join(
@@ -42,11 +71,10 @@ class MangaProcessor:
                         # honi chahiye, warna scroll/audio drift ho jaata hai
 
     # gemini-2.5-flash free-tier sirf 10 RPM (requests/minute) deta hai —
-    # matlab 2 calls ke beech kam se kam 6 second ka gap chahiye. Pehle
-    # hum calls jitni fast ho sake bhej dete the aur 429 aane ka wait
-    # karte the (jisme har retry 65s leta tha — bohot slow). Ab proactively
-    # har call se pehle thoda wait karte hain taaki 429 hi kam aaye.
-    MIN_GEMINI_GAP = 6.5  # seconds, 10 RPM se thoda zyada margin ke saath
+    # matlab 2 calls ke beech kam se kam 6 second ka gap chahiye. Multiple
+    # keys hain to har KEY ka apna last-call time track karte hain aur
+    # jo key sabse zyada "rest" kar chuki ho use prefer karte hain.
+    MIN_GEMINI_GAP = 6.5  # seconds per key
 
     AUDIO_SPEED = 1.5  # voice playback speed multiplier — TTS audio
                         # generate hone ke turant baad isi speed se
@@ -57,12 +85,10 @@ class MangaProcessor:
                         # speed-adjustment ki zaroorat nahi padti
 
     def __init__(self):
-        # gemini-2.0-flash 1 June 2026 ko shutdown ho gaya tha — isliye
-        # gemini-2.5-flash use kar rahe hain (same price jo 2.0-flash ka
-        # tha: $0.10/$0.40 per million tokens, behtar output limit bhi)
         self.model_name = 'gemini-2.5-flash'
         self.temp_files = []
-        self._last_gemini_call_time = 0.0
+        # Per-key last-call timestamp — index matches GEMINI_API_KEYS list
+        self._key_last_call = [0.0] * len(GEMINI_API_KEYS)
 
     # ─────────────────────────────────────────
     # 1. PDF → Images
@@ -251,32 +277,41 @@ class MangaProcessor:
         return cleaned_paths
 
     # ─────────────────────────────────────────
+    # 2b. Best available Gemini key choose karo
+    # ─────────────────────────────────────────
+    def _pick_best_key(self, exclude_idx: int = None) -> int:
+        """
+        Jo key sabse zyada rest kar chuki ho (last call sabse pehle tha)
+        use return karo. Agar koi key 'exclude_idx' pe hai (abhi 429 diya),
+        usse skip karo — rotation ka core logic yahi hai.
+        """
+        now = time.time()
+        best_idx, best_rest = -1, -1.0
+        for i, last in enumerate(self._key_last_call):
+            if i == exclude_idx:
+                continue
+            rest = now - last
+            if rest > best_rest:
+                best_rest = rest
+                best_idx = i
+        # Agar sab exclude hain (sirf 1 key hai), wahi return karo
+        if best_idx == -1:
+            best_idx = 0
+        return best_idx
+
+    # ─────────────────────────────────────────
     # 3. Gemini se per-panel "beats" — explainer-style script
     # ─────────────────────────────────────────
-    # Har panel ke liye Gemini ko ek baar call karte hain (zyada accurate
-    # rehta hai, kyunki Gemini ko sirf ek image par dhyaan dena hota hai).
-    # Response: list of beats, har beat mein:
-    #   - "text": Hindi/Hinglish narration (dialogue + expression + scene
-    #     ka explainer-style mix — sirf bubble text nahi)
-    #   - "position": 0-100 (panel ke kis vertical %% par yeh beat focus
-    #     karta hai — 0 = top, 100 = bottom)
     def _make_fallback_beats(self) -> list:
         # NOTE: Yeh tab use hota hai jab Gemini call 3 baar fail ho jaaye.
-        # Pehle isme 3 "beats" the jo normal content jaisa dikhte the —
-        # isse pata hi nahi chalta tha ki AI fail hua ya yeh actual script
-        # hai. Ab sirf EK clearly-fallback beat hai poore panel ke liye,
-        # taaki agar yeh dikhe to turant samajh aaye ki Gemini fail hua,
-        # aur logs check karne chahiye — fake/normal content jaisa nahi lagega.
         return [
             {"text": "Yeh panel abhi load nahi ho paya, aage badhte hain.", "position": 50},
         ]
 
     async def generate_panel_script(self, image_path: str, story_context: str = "") -> tuple:
         """
-        story_context: ab tak ki kahani ka short summary (character names,
-        jo ho chuka hai) — pichle panels se carry hota hai, taaki Gemini
-        YouTube-style continuity rakh sake ("Nancy ne kaha...", "Tabhi
-        vampire boy bola...") instead of generic "ladki ne kaha".
+        story_context: ab tak ki kahani ka short summary — pichle panels se
+        carry hota hai taaki Gemini continuity rakh sake.
 
         Returns: (beats_list, updated_story_context)
         """
@@ -374,28 +409,35 @@ class MangaProcessor:
             ],
         )
 
-        for attempt in range(1, 4):
-            try:
-                # Proactive throttle — pichli Gemini call se kam se kam
-                # MIN_GEMINI_GAP second ka gap rakho, taaki 10 RPM free-tier
-                # limit khud hi cross na karein (429 aane ka wait karne se
-                # behtar hai pehle se thoda slow chalna)
-                elapsed = time.time() - self._last_gemini_call_time
-                if elapsed < self.MIN_GEMINI_GAP:
-                    await asyncio.sleep(self.MIN_GEMINI_GAP - elapsed)
+        # Total attempts = min(3, number_of_keys * 2) — taaki multiple keys
+        # ke saath zyada chances milein bina infinite loop ke
+        max_attempts = min(3 * len(GEMINI_API_KEYS), max(3, len(GEMINI_API_KEYS) * 2))
+        last_429_key = None   # 429 dene wali key ko next attempt mein avoid karo
 
-                logger.info(f"Gemini panel-script call attempt {attempt}/3")
+        for attempt in range(1, max_attempts + 1):
+            # Best key choose karo — jo sabse zyada rest kar chuki ho
+            key_idx = self._pick_best_key(exclude_idx=last_429_key)
+            client = _get_genai_client(key_idx)
+
+            # Proactive throttle sirf us key ke liye
+            elapsed = time.time() - self._key_last_call[key_idx]
+            if elapsed < self.MIN_GEMINI_GAP:
+                wait_needed = self.MIN_GEMINI_GAP - elapsed
+                logger.info(f"Key {key_idx+1} throttle — {wait_needed:.1f}s wait...")
+                await asyncio.sleep(wait_needed)
+
+            try:
+                logger.info(f"Gemini panel-script call attempt {attempt} (key {key_idx+1}/{len(GEMINI_API_KEYS)})")
                 loop = asyncio.get_event_loop()
-                self._last_gemini_call_time = time.time()
+                self._key_last_call[key_idx] = time.time()
                 response = await loop.run_in_executor(
-                    None, lambda: genai_client.models.generate_content(
+                    None, lambda c=client: c.models.generate_content(
                         model=self.model_name,
                         contents=content_parts,
                         config=gen_config,
                     )
                 )
 
-                # Safety-block ya empty response check
                 if not response.candidates:
                     raise ValueError("Gemini ne koi candidate nahi diya (shayad safety block)")
                 candidate = response.candidates[0]
@@ -438,7 +480,6 @@ class MangaProcessor:
 
                 beats.sort(key=lambda b: b["position"])
 
-                # Agar Gemini ne context nahi diya, purana hi carry karo
                 if not new_context:
                     new_context = story_context
 
@@ -447,41 +488,216 @@ class MangaProcessor:
 
             except Exception as e:
                 err_str = str(e)
-                logger.error(f"Gemini error (attempt {attempt}/3) for {os.path.basename(image_path)}: {err_str[:300]}")
+                logger.error(f"Gemini error (attempt {attempt}) key {key_idx+1} for {os.path.basename(image_path)}: {err_str[:300]}")
 
                 is_rate_limit = ('429' in err_str or
                                  'quota' in err_str.lower() or
-                                 'rate' in err_str.lower())
-                # 503/UNAVAILABLE = Gemini temporarily overloaded (alag
-                # cheez hai quota/rate-limit se) — yeh usually kuch second
-                # mein clear ho jaata hai, isliye chhota retry dete hain
-                # seedha fallback pe jaane se pehle (warna 8-panel manga
-                # mein kayi panels seedhe generic fallback text le lete
-                # the jab Gemini thodi der ke liye busy tha)
+                                 'RESOURCE_EXHAUSTED' in err_str)
                 is_overloaded = ('503' in err_str or
                                   'unavailable' in err_str.lower() or
                                   'overloaded' in err_str.lower())
 
-                if is_rate_limit and attempt < 3:
-                    wait_time = 65
-                    m = re.search(r'seconds:\s*(\d+)', err_str)
-                    if m:
-                        wait_time = int(m.group(1)) + 10
-                    logger.info(f"Rate limit — {wait_time}s wait karke retry...")
-                    await asyncio.sleep(wait_time)
-                elif is_overloaded and attempt < 3:
-                    wait_time = 5 * attempt  # 5s, 10s — chhota backoff
+                if is_rate_limit:
+                    last_429_key = key_idx  # next attempt mein yeh key avoid karo
+                    if len(GEMINI_API_KEYS) > 1:
+                        # Doosri key available hai — turant switch, no 65s wait
+                        logger.info(f"Key {key_idx+1} rate-limited — dusri key pe switch kar raha hoon...")
+                        await asyncio.sleep(1)   # tiny buffer only
+                    else:
+                        # Sirf 1 key hai — purana 65s wait fallback
+                        wait_time = 65
+                        m = re.search(r'seconds:\s*(\d+)', err_str)
+                        if m:
+                            wait_time = int(m.group(1)) + 10
+                        logger.info(f"Sirf 1 key hai — {wait_time}s wait karke retry...")
+                        await asyncio.sleep(wait_time)
+                elif is_overloaded:
+                    wait_time = 5 * attempt
                     logger.info(f"Gemini overloaded (503) — {wait_time}s wait karke retry...")
                     await asyncio.sleep(wait_time)
                 else:
-                    break
+                    break   # non-retryable error
 
         logger.info("Fallback beats use kar raha hoon is panel ke liye")
         return self._make_fallback_beats(), story_context
 
     # ─────────────────────────────────────────
-    # 4. gTTS Audio
+    # 3b. Batch: 2 panels ek hi Gemini call mein process karo
     # ─────────────────────────────────────────
+    # Isse Gemini calls aadhi ho jaati hain — 8 pages ke liye 8 calls ki
+    # jagah sirf 4 calls. Free tier (10 RPM) par yeh bahut fark dalta hai.
+    async def generate_panel_scripts_batch(
+        self, image_paths: list, story_context: str = ""
+    ) -> tuple:
+        """
+        image_paths: 2 panel images ki list (ek ya do)
+        Returns: (list_of_beats_per_panel, updated_story_context)
+        Agar batch call fail ho to har panel pe individually fallback karta hai.
+        """
+        if len(image_paths) == 1:
+            # Sirf ek panel — single call hi use karo
+            beats, ctx = await self.generate_panel_script(image_paths[0], story_context)
+            return [beats], ctx
+
+        # 2 images ek sath bhejna
+        img_parts = []
+        for i, path in enumerate(image_paths):
+            try:
+                with open(path, 'rb') as f:
+                    img_bytes = f.read()
+                img_parts.append((i + 1, img_bytes))
+            except Exception as e:
+                logger.warning(f"Batch image read error ({path}): {e}")
+                img_parts.append((i + 1, None))
+
+        context_block = (
+            f"📖 AB TAK KI KAHANI:\n{story_context}\n\n"
+            if story_context.strip() else
+            "📖 Yeh pehle panels hain — koi pichla context nahi.\n\n"
+        )
+
+        batch_prompt = (
+            "Tu ek POPULAR YouTube manga/comic EXPLAINER hai. Tujhe EKTATH "
+            "2 manga panels diye ja rahe hain (Panel 1 aur Panel 2, is "
+            "sequence mein). Dono ko top-to-bottom order mein process kar.\n\n"
+            + context_block +
+            "RULES (dono panels ke liye):\n"
+            "1. Speech bubbles ka text KISI BHI language mein ho — Hindi/Hinglish mein natural translate karo.\n"
+            "2. Character naam pata ho to naam use karo.\n"
+            "3. Dialogue ke saath expression, mood, body language bhi bata.\n"
+            "4. Real narrator ki tarah bol — viewer ko engage rakho.\n"
+            "5. CONCISE rakh — har beat ideally ek sentence.\n"
+            "6. Panel ke top se bottom tak 'beats' mein todo.\n\n"
+            "Sirf JSON return karo is EXACT format mein (kuch aur nahi):\n"
+            '{"panel_1": {"beats": [{"position": 10, "text": "..."}, ...], '
+            '"updated_context": "..."}, '
+            '"panel_2": {"beats": [{"position": 20, "text": "..."}, ...], '
+            '"updated_context": "..."}}'
+        )
+
+        content_parts = [types.Part.from_text(text=batch_prompt)]
+        valid_indices = []
+        for panel_num, img_bytes in img_parts:
+            if img_bytes is not None:
+                content_parts.append(
+                    types.Part.from_text(text=f"[Panel {panel_num}]")
+                )
+                content_parts.append(
+                    types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")
+                )
+                valid_indices.append(panel_num - 1)
+
+        gen_config = types.GenerateContentConfig(
+            safety_settings=[
+                types.SafetySetting(category='HARM_CATEGORY_HARASSMENT', threshold='BLOCK_NONE'),
+                types.SafetySetting(category='HARM_CATEGORY_HATE_SPEECH', threshold='BLOCK_NONE'),
+                types.SafetySetting(category='HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold='BLOCK_NONE'),
+                types.SafetySetting(category='HARM_CATEGORY_DANGEROUS_CONTENT', threshold='BLOCK_NONE'),
+            ],
+        )
+
+        max_attempts = min(3 * len(GEMINI_API_KEYS), max(3, len(GEMINI_API_KEYS) * 2))
+        last_429_key = None
+        ctx = story_context
+
+        for attempt in range(1, max_attempts + 1):
+            key_idx = self._pick_best_key(exclude_idx=last_429_key)
+            client = _get_genai_client(key_idx)
+
+            elapsed = time.time() - self._key_last_call[key_idx]
+            if elapsed < self.MIN_GEMINI_GAP:
+                wait_needed = self.MIN_GEMINI_GAP - elapsed
+                logger.info(f"Batch key {key_idx+1} throttle — {wait_needed:.1f}s wait...")
+                await asyncio.sleep(wait_needed)
+
+            try:
+                logger.info(f"Gemini BATCH call attempt {attempt} (key {key_idx+1}/{len(GEMINI_API_KEYS)}) for {len(image_paths)} panels")
+                loop = asyncio.get_event_loop()
+                self._key_last_call[key_idx] = time.time()
+                response = await loop.run_in_executor(
+                    None, lambda c=client: c.models.generate_content(
+                        model=self.model_name,
+                        contents=content_parts,
+                        config=gen_config,
+                    )
+                )
+
+                if not response.candidates:
+                    raise ValueError("No candidates (safety block)")
+                candidate = response.candidates[0]
+                finish_str = str(getattr(getattr(candidate, 'finish_reason', None), 'name', '') or "")
+                if finish_str and 'STOP' not in finish_str.upper():
+                    raise ValueError(f"finish_reason: {finish_str}")
+
+                text = response.text.strip()
+                if '```json' in text:
+                    text = text.split('```json')[1].split('```')[0].strip()
+                elif '```' in text:
+                    text = text.split('```')[1].split('```')[0].strip()
+
+                parsed = json.loads(text)
+                if not isinstance(parsed, dict):
+                    raise ValueError("Response dict nahi hai")
+
+                all_beats = []
+                for pi in range(len(image_paths)):
+                    key = f"panel_{pi + 1}"
+                    pdata = parsed.get(key, {})
+                    raw_beats = pdata.get("beats", [])
+                    beats = []
+                    for item in raw_beats:
+                        txt = (item.get("text") or "").strip()
+                        if not txt:
+                            continue
+                        pos = item.get("position", 50)
+                        try:
+                            pos = max(0, min(100, float(pos)))
+                        except (TypeError, ValueError):
+                            pos = 50
+                        beats.append({"text": txt, "position": pos})
+                    if not beats:
+                        beats = self._make_fallback_beats()
+                    beats.sort(key=lambda b: b["position"])
+                    all_beats.append(beats)
+                    # last panel ka context carry karo
+                    new_ctx = (pdata.get("updated_context") or "").strip()
+                    if new_ctx:
+                        ctx = new_ctx
+
+                logger.info(f"Batch: {len(image_paths)} panels process hue")
+                return all_beats, ctx
+
+            except Exception as e:
+                err_str = str(e)
+                logger.error(f"Batch Gemini error (attempt {attempt}) key {key_idx+1}: {err_str[:300]}")
+
+                is_rate_limit = ('429' in err_str or 'RESOURCE_EXHAUSTED' in err_str or 'quota' in err_str.lower())
+                is_overloaded = ('503' in err_str or 'unavailable' in err_str.lower())
+
+                if is_rate_limit:
+                    last_429_key = key_idx
+                    if len(GEMINI_API_KEYS) > 1:
+                        logger.info(f"Batch key {key_idx+1} rate-limited — switch kar raha hoon...")
+                        await asyncio.sleep(1)
+                    else:
+                        wait_time = 65
+                        m = re.search(r'seconds:\s*(\d+)', err_str)
+                        if m:
+                            wait_time = int(m.group(1)) + 10
+                        logger.info(f"Batch 1-key fallback — {wait_time}s wait...")
+                        await asyncio.sleep(wait_time)
+                elif is_overloaded:
+                    await asyncio.sleep(5 * attempt)
+                else:
+                    break
+
+        # Batch fail — individually fallback
+        logger.warning("Batch call fail — har panel individually try kar raha hoon...")
+        all_beats = []
+        for path in image_paths:
+            beats, ctx = await self.generate_panel_script(path, ctx)
+            all_beats.append(beats)
+        return all_beats, ctx
     # NOTE: gTTS sirf ek hi Hindi voice deta hai — true male/female switch
     # iske paas nahi hai. "voice" setting yahan sirf tld (accent/tone) badalti
     # hai — halka sa style difference, na ki alag gender wali awaaz.
