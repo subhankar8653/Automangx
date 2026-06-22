@@ -706,24 +706,25 @@ class MangaProcessor:
         "hi-male": "com",
     }
 
-    async def text_to_speech(self, text: str, output_path: str, voice: str = "hi-female"):
+    async def text_to_speech(self, text: str, output_path: str, voice: str = "hi-female") -> float:
+        """
+        Returns: actual audio duration in seconds (after speed-up).
+        Caller should use this value — NOT re-read from AudioFileClip,
+        because MP3 header-declared duration can differ from actual playback.
+        """
         tld = self.VOICE_TLD_MAP.get(voice, "co.in")
         loop = asyncio.get_event_loop()
+        result = {"duration": 0.0}
 
         def _gen():
             gTTS(text=text, lang='hi', tld=tld, slow=False).save(output_path)
 
-            # Voice ko AUDIO_SPEED (1.5x) tak speed-up karte hain — yeh
-            # yahan karna isliye zaroori hai (na ki baad mein final video
-            # pe), kyunki create_panel_clip mein scroll-timeline isi audio
-            # file ki duration padh ke banti hai. Agar speed-up baad mein
-            # karte to scroll/audio phir se out-of-sync ho jaata.
+            from pydub import AudioSegment
+            sound = AudioSegment.from_file(output_path)
+
             if self.AUDIO_SPEED and self.AUDIO_SPEED != 1.0:
                 sped_path = output_path + '.sped.mp3'
                 try:
-                    from pydub import AudioSegment
-                    sound = AudioSegment.from_mp3(output_path)
-                    # frame_rate badhaao = faster playback, no moviepy dependency
                     new_rate = int(sound.frame_rate * self.AUDIO_SPEED)
                     fast_sound = sound._spawn(
                         sound.raw_data,
@@ -731,15 +732,21 @@ class MangaProcessor:
                     ).set_frame_rate(sound.frame_rate)
                     fast_sound.export(sped_path, format="mp3")
                     os.replace(sped_path, output_path)
+                    # pydub se exact duration lo — headers pe bharosa mat karo
+                    result["duration"] = len(fast_sound) / 1000.0
                 except Exception as e:
-                    logger.warning(f"Audio speed-up fail ({e}) — normal-speed audio use kar raha hoon")
+                    logger.warning(f"Audio speed-up fail ({e}) — normal speed use kar raha hoon")
                     if os.path.exists(sped_path):
                         try:
                             os.remove(sped_path)
                         except Exception:
                             pass
+                    result["duration"] = len(sound) / 1000.0
+            else:
+                result["duration"] = len(sound) / 1000.0
 
         await loop.run_in_executor(None, _gen)
+        return result["duration"]
 
     # ─────────────────────────────────────────
     # 5. Panel ko CANVAS_W tak scale karna (no distortion, no stretch)
@@ -811,6 +818,10 @@ class MangaProcessor:
         scroll_range = max(0, scaled_h - CANVAS_H)
 
         # ── Step 1: Har beat ka audio banao, duration nikaalo ──
+        # CRITICAL: duration sirf TTS return value se lo — AudioFileClip se
+        # nahi. VBR MP3 headers mein declared duration actual playback se
+        # differ kar sakti hai (50-200ms off). Agar yahan galat duration
+        # aaye to timeline aur audio drift ho jaata hai.
         beat_audio_paths = []
         beat_durations = []
         for i, beat in enumerate(beats):
@@ -820,12 +831,14 @@ class MangaProcessor:
             self.temp_files.append(audio_path)
 
             try:
-                await self.text_to_speech(beat["text"], audio_path, voice=voice)
+                actual_dur = await self.text_to_speech(beat["text"], audio_path, voice=voice)
                 if not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
                     raise ValueError("Audio empty")
-                clip = AudioFileClip(audio_path)
-                dur = clip.duration + self.BEAT_PAUSE  # chhota pause beats ke beech
-                clip.close()
+                if actual_dur <= 0:
+                    # Fallback: pydub se dobara read karo
+                    from pydub import AudioSegment
+                    actual_dur = len(AudioSegment.from_file(audio_path)) / 1000.0
+                dur = actual_dur + self.BEAT_PAUSE
             except Exception as e:
                 logger.warning(f"Beat {i} TTS error: {e} — 1.5s silence fallback")
                 dur = 1.5
@@ -838,6 +851,9 @@ class MangaProcessor:
             total_duration = 1.5
 
         # ── Step 2: Beat-timeline banao — har beat ka (start_time, end_time, position_px) ──
+        # NOTE: Pehle timeline banate hain, fir actual_duration milne ke baad
+        # last segment ka end clamp karte hain — taaki video duration aur
+        # last beat ka end_time exactly match karein (no hanging frames).
         timeline = []
         t_cursor = 0.0
         for beat, dur in zip(beats, beat_durations):
@@ -849,35 +865,75 @@ class MangaProcessor:
             })
             t_cursor += dur
 
-        # ── Step 3: Concatenate saare beat-audios ek single audio mein ──
-        # IMPORTANT: timeline (Step 2) har beat ke baad self.BEAT_PAUSE
-        # ka silence gap maan ke chalti hai. Agar yahan audio mein woh
-        # gap nahi daala jaaye, to actual audio chhota reh jaata hai aur
-        # visual scroll se aage-peeche drift ho jaata hai (jitne zyada
-        # beats, utna zyada drift) — isi wajah se "jo bola jaa raha hai
-        # uske hisab se screen pe scene nahi dikhta" wala bug aata tha.
+        # ── Step 3: pydub se saare beats ek file mein concat karo ──
+        # Pydub sample-accurate hai — koi floating point clock drift nahi,
+        # koi VBR header ambiguity nahi. Silence bhi exact milliseconds mein.
+        # Final combined file ka duration hi video duration hoga — yeh
+        # timeline ke sum se EXACTLY match karega kyunki hum wahi beats +
+        # wahi silence gaps dono jagah use kar rahe hain.
+        combined_audio_path = None
         audio_clip = None
+        actual_duration = total_duration  # fallback
+
         try:
-            valid_audio_clips = []
+            from pydub import AudioSegment
+            silence_ms = int(self.BEAT_PAUSE * 1000)
+            silence_seg = AudioSegment.silent(duration=silence_ms)
+
+            combined = AudioSegment.empty()
+            valid_count = 0
             for idx, p in enumerate(beat_audio_paths):
                 if os.path.exists(p) and os.path.getsize(p) > 0:
-                    valid_audio_clips.append(AudioFileClip(p))
-                # Har beat (last ko chhodke) ke baad timeline jaisa hi
-                # silence gap daalo, taaki audio aur scroll exactly sync rahein
+                    seg = AudioSegment.from_file(p)
+                    combined += seg
+                    valid_count += 1
+                else:
+                    # Missing beat audio — silence se fill karo
+                    fallback_dur_ms = int((beat_durations[idx] - self.BEAT_PAUSE) * 1000)
+                    combined += AudioSegment.silent(duration=max(500, fallback_dur_ms))
+                # Har beat ke baad (last ko chhodke) exact silence gap daalo
                 if idx < len(beat_audio_paths) - 1:
-                    silence = AudioClip(
-                        lambda t: 0, duration=self.BEAT_PAUSE, fps=44100
-                    )
-                    valid_audio_clips.append(silence)
-            if valid_audio_clips:
-                audio_clip = concatenate_audioclips(valid_audio_clips)
-            else:
-                audio_clip = None
-        except Exception as e:
-            logger.warning(f"Audio concat error: {e}")
-            audio_clip = None
+                    combined += silence_seg
 
-        actual_duration = audio_clip.duration if audio_clip else total_duration
+            if valid_count > 0 and len(combined) > 0:
+                combined_tmp = tempfile.NamedTemporaryFile(
+                    suffix='_combined_audio.mp3', delete=False)
+                combined_audio_path = combined_tmp.name
+                combined_tmp.close()
+                self.temp_files.append(combined_audio_path)
+                combined.export(combined_audio_path, format="mp3", bitrate="128k")
+
+                # pydub se exact duration — timeline ke saath guaranteed match
+                actual_duration = len(combined) / 1000.0
+                audio_clip = AudioFileClip(combined_audio_path)
+                logger.info(f"Audio concat done: {actual_duration:.2f}s, {valid_count} beats")
+            else:
+                logger.warning("Koi valid beat audio nahi mili — video bina audio ke banegi")
+
+        except Exception as e:
+            logger.warning(f"pydub audio concat error: {e} — moviepy fallback")
+            try:
+                valid_audio_clips = []
+                for idx, p in enumerate(beat_audio_paths):
+                    if os.path.exists(p) and os.path.getsize(p) > 0:
+                        valid_audio_clips.append(AudioFileClip(p))
+                    if idx < len(beat_audio_paths) - 1:
+                        silence = AudioClip(lambda t: 0, duration=self.BEAT_PAUSE, fps=44100)
+                        valid_audio_clips.append(silence)
+                if valid_audio_clips:
+                    audio_clip = concatenate_audioclips(valid_audio_clips)
+                    actual_duration = audio_clip.duration
+            except Exception as e2:
+                logger.warning(f"Moviepy fallback bhi fail: {e2}")
+                audio_clip = None
+
+        # ── Step 3b: Timeline last segment clamp — video end pe audio cut na ho ──
+        # actual_duration ab pydub se aaya hai (exact). Last beat ka end_time
+        # timeline mein actual_duration se match karna chahiye, warna video
+        # actual_duration pe khatam hoga lekin last beat ka scroll position
+        # hold nahi hoga, ya ek extra frame dikhega.
+        if timeline:
+            timeline[-1]["end"] = actual_duration
 
         # ── Step 4: Scroll-position-at-time function ──
         def get_y_at_time(t):
