@@ -10,7 +10,8 @@ import json
 import time
 from pathlib import Path
 from PIL import Image
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from gtts import gTTS
 from moviepy.editor import (
     ImageClip, AudioFileClip, concatenate_videoclips, concatenate_audioclips,
@@ -21,7 +22,7 @@ from pdf2image import convert_from_path
 logger = logging.getLogger(__name__)
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_GEMINI_KEY_HERE")
-genai.configure(api_key=GEMINI_API_KEY)
+genai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 # Default BGM track — isi folder mein assets/default_bgm.mp3 rakhna hai
 DEFAULT_BGM_PATH = os.path.join(
@@ -36,7 +37,10 @@ CANVAS_W, CANVAS_H = 1280, 720  # 16:9 video canvas
 class MangaProcessor:
 
     def __init__(self):
-        self.model = genai.GenerativeModel('gemini-2.0-flash')
+        # gemini-2.0-flash 1 June 2026 ko shutdown ho gaya tha — isliye
+        # gemini-2.5-flash use kar rahe hain (same price jo 2.0-flash ka
+        # tha: $0.10/$0.40 per million tokens, behtar output limit bhi)
+        self.model_name = 'gemini-2.5-flash'
         self.temp_files = []
 
     # ─────────────────────────────────────────
@@ -252,23 +256,28 @@ class MangaProcessor:
         )
 
         content_parts = [
-            prompt,
-            {"inline_data": {"mime_type": "image/jpeg", "data": img_bytes}}
+            types.Part.from_text(text=prompt),
+            types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"),
         ]
+
+        gen_config = types.GenerateContentConfig(
+            safety_settings=[
+                types.SafetySetting(category='HARM_CATEGORY_HARASSMENT', threshold='BLOCK_NONE'),
+                types.SafetySetting(category='HARM_CATEGORY_HATE_SPEECH', threshold='BLOCK_NONE'),
+                types.SafetySetting(category='HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold='BLOCK_NONE'),
+                types.SafetySetting(category='HARM_CATEGORY_DANGEROUS_CONTENT', threshold='BLOCK_NONE'),
+            ],
+        )
 
         for attempt in range(1, 4):
             try:
                 logger.info(f"Gemini panel-script call attempt {attempt}/3")
                 loop = asyncio.get_event_loop()
                 response = await loop.run_in_executor(
-                    None, lambda: self.model.generate_content(
-                        content_parts,
-                        safety_settings={
-                            'HARM_CATEGORY_HARASSMENT': 'BLOCK_NONE',
-                            'HARM_CATEGORY_HATE_SPEECH': 'BLOCK_NONE',
-                            'HARM_CATEGORY_SEXUALLY_EXPLICIT': 'BLOCK_NONE',
-                            'HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_NONE',
-                        }
+                    None, lambda: genai_client.models.generate_content(
+                        model=self.model_name,
+                        contents=content_parts,
+                        config=gen_config,
                     )
                 )
 
@@ -277,8 +286,8 @@ class MangaProcessor:
                     raise ValueError("Gemini ne koi candidate nahi diya (shayad safety block)")
                 candidate = response.candidates[0]
                 finish_reason = getattr(candidate, 'finish_reason', None)
-                finish_str = str(finish_reason) if finish_reason is not None else ""
-                if finish_str and not any(s in finish_str.upper() for s in ('STOP', '1')):
+                finish_str = str(getattr(finish_reason, 'name', finish_reason) or "")
+                if finish_str and 'STOP' not in finish_str.upper():
                     raise ValueError(f"Gemini finish_reason: {finish_str} (safety/length block ho sakta hai)")
 
                 text = response.text.strip()
