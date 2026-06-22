@@ -64,7 +64,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def build_settings_text(s: dict) -> str:
     bgm_status = f"ON ({s['bgm_volume']}%)" if s['bgm_enabled'] else "OFF"
-    blur_status = f"{s['blur']}%" if s['blur'] > 0 else "OFF"
     voice_label = VOICE_OPTIONS.get(s['voice'], {}).get('label', s['voice'])
     text_status = "Removed (clean panel)" if s.get('text_removal') else "Kept (original bubbles)"
     return (
@@ -72,7 +71,6 @@ def build_settings_text(s: dict) -> str:
         f"🎥 Quality: `{s['quality']}`\n"
         f"🗣️ Voice: `{voice_label}`\n"
         f"🎵 BGM: `{bgm_status}`\n"
-        f"🌫️ Blur: `{blur_status}`\n"
         f"📝 Panel Text: `{text_status}`\n\n"
         "👇 Select option to change:"
     )
@@ -82,8 +80,7 @@ def build_settings_keyboard():
         [InlineKeyboardButton("🎥 Quality", callback_data="menu_quality"),
          InlineKeyboardButton("🗣️ Voice", callback_data="menu_voice")],
         [InlineKeyboardButton("🎵 BGM", callback_data="menu_bgm"),
-         InlineKeyboardButton("🌫️ Blur", callback_data="menu_blur")],
-        [InlineKeyboardButton("📝 Panel Text", callback_data="menu_text_removal")],
+         InlineKeyboardButton("📝 Panel Text", callback_data="menu_text_removal")],
         [InlineKeyboardButton("🔄 Reset to Default", callback_data="reset_settings")],
     ])
 
@@ -200,34 +197,6 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ── Blur submenu ──
-    if data == "menu_blur":
-        buttons = [
-            [InlineKeyboardButton("🔲 OFF", callback_data="set_blur_0")],
-            [InlineKeyboardButton("Low (25%)", callback_data="set_blur_25"),
-             InlineKeyboardButton("Medium (50%)", callback_data="set_blur_50")],
-            [InlineKeyboardButton("High (75%)", callback_data="set_blur_75")],
-            [InlineKeyboardButton("⬅️ Back", callback_data="back_settings")],
-        ]
-        await query.edit_message_text(
-            "🌫️ *Blur strength select karo:*\n"
-            "_(short-video style blurred background ke piche image fit hoti hai)_",
-            parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
-        return
-
-    if data.startswith("set_blur_"):
-        val = int(data.replace("set_blur_", ""))
-        await update_user_setting(user_id, "blur", val)
-        s = await get_user_settings(user_id)
-        await query.edit_message_text(
-            "✅ Blur updated!\n\n" + build_settings_text(s),
-            parse_mode='Markdown',
-            reply_markup=build_settings_keyboard()
-        )
-        return
-
     # ── Panel Text (text removal) submenu ──
     if data == "menu_text_removal":
         buttons = [
@@ -338,7 +307,7 @@ async def process_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     status_msg = await update.message.reply_text(
         "🎬 *Video ban rahi hai...*\n\n"
-        "⏳ Step 1/5: Images process ho rahi hain...",
+        "⏳ Step 1/4: Images process ho rahi hain...",
         parse_mode='Markdown'
     )
 
@@ -347,14 +316,14 @@ async def process_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if pdf_path:
             await status_msg.edit_text(
                 "🎬 *Video ban rahi hai...*\n\n"
-                "⏳ Step 1/5: PDF se images nikal raha hoon...",
+                "⏳ Step 1/4: PDF se images nikal raha hoon...",
                 parse_mode='Markdown'
             )
             image_paths = processor.pdf_to_images(pdf_path)
         elif zip_path:
             await status_msg.edit_text(
                 "🎬 *Video ban rahi hai...*\n\n"
-                "⏳ Step 1/5: ZIP se images nikal raha hoon...",
+                "⏳ Step 1/4: ZIP se images nikal raha hoon...",
                 parse_mode='Markdown'
             )
             image_paths = processor.zip_to_images(zip_path)
@@ -363,49 +332,55 @@ async def process_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if settings.get('text_removal'):
             await status_msg.edit_text(
                 "🎬 *Video ban rahi hai...*\n\n"
-                "✅ Step 1/5: Images ready!\n"
-                "⏳ Step 2/5: Manga text hat raha hai...",
+                "✅ Step 1/4: Images ready!\n"
+                "⏳ Step 2/4: Manga text hat raha hai...",
                 parse_mode='Markdown'
             )
             cleaned_images = processor.remove_text_from_images(image_paths)
         else:
             cleaned_images = list(image_paths)
 
-        # Step 3: 16:9 canvas mein fit + blur background (hamesha hota hai)
+        # Step 3: Har panel ke liye explainer-script (dialogue + expression
+        # + scene) generate karo, position-tagged beats ke saath
         await status_msg.edit_text(
             "🎬 *Video ban rahi hai...*\n\n"
-            "✅ Step 1/5: Images ready!\n"
-            "✅ Step 2/5: Panel text settings apply ho gayi!\n"
-            "⏳ Step 3/5: 16:9 canvas mein fit kar raha hoon...",
+            "✅ Step 1/4: Images ready!\n"
+            "✅ Step 2/4: Panel text settings apply ho gayi!\n"
+            "⏳ Step 3/4: Har panel ka explainer-script likh raha hoon "
+            f"(0/{len(cleaned_images)})...",
             parse_mode='Markdown'
         )
-        styled_images = processor.apply_blur_background(cleaned_images, settings['blur'])
+        panel_beats = []
+        for i, img_path in enumerate(cleaned_images):
+            beats = await processor.generate_panel_script(img_path)
+            panel_beats.append(beats)
+            if (i + 1) % 2 == 0 or (i + 1) == len(cleaned_images):
+                try:
+                    await status_msg.edit_text(
+                        "🎬 *Video ban rahi hai...*\n\n"
+                        "✅ Step 1/4: Images ready!\n"
+                        "✅ Step 2/4: Panel text settings apply ho gayi!\n"
+                        f"⏳ Step 3/4: Script likh raha hoon "
+                        f"({i + 1}/{len(cleaned_images)})...",
+                        parse_mode='Markdown'
+                    )
+                except Exception:
+                    pass  # rate-limit pe edit fail ho sakta hai, ignore karo
 
-        # Step 4: Generate Hindi narration (panel ke dialogue se)
+        # Step 4: Scroll-synced video banao (voice + BGM)
         await status_msg.edit_text(
             "🎬 *Video ban rahi hai...*\n\n"
-            "✅ Step 1/5: Images ready!\n"
-            "✅ Step 2/5: Panel text settings apply ho gayi!\n"
-            "✅ Step 3/5: 16:9 canvas mein fit ho gaya!\n"
-            "⏳ Step 4/5: Panel ka dialogue padh raha hoon...",
-            parse_mode='Markdown'
-        )
-        hindi_script = await processor.generate_hindi_script(image_paths)
-
-        # Step 5: Generate video with voice + BGM
-        await status_msg.edit_text(
-            "🎬 *Video ban rahi hai...*\n\n"
-            "✅ Step 1/5: Images ready!\n"
-            "✅ Step 2/5: Panel text settings apply ho gayi!\n"
-            "✅ Step 3/5: 16:9 canvas mein fit ho gaya!\n"
-            "✅ Step 4/5: Script taiyar!\n"
-            "⏳ Step 5/5: Voice, BGM aur video sync ho raha hai...",
+            "✅ Step 1/4: Images ready!\n"
+            "✅ Step 2/4: Panel text settings apply ho gayi!\n"
+            "✅ Step 3/4: Explainer-script taiyar!\n"
+            "⏳ Step 4/4: Voice, scroll-sync aur BGM se video ban rahi hai... "
+            "(thoda time lagega)",
             parse_mode='Markdown'
         )
 
         quality_height = QUALITY_OPTIONS.get(settings['quality'], 720)
-        video_path = await processor.create_video_with_voice(
-            styled_images, hindi_script,
+        video_path = await processor.create_video_from_panels(
+            cleaned_images, panel_beats,
             quality_height=quality_height,
             voice=settings['voice'],
             bgm_enabled=settings['bgm_enabled'],
@@ -418,7 +393,7 @@ async def process_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE,
         with open(video_path, 'rb') as video_file:
             await update.message.reply_video(
                 video=video_file,
-                caption="🎌 *Tumhari Manga Video!*\n\nKaisi lagi? Aur bhejo! 🔥\n\n⚙️ /settings se style change karo",
+                caption="🎌 *Tumhari Manga Explainer Video!*\n\nKaisi lagi? Aur bhejo! 🔥\n\n⚙️ /settings se style change karo",
                 parse_mode='Markdown',
                 supports_streaming=True
             )
@@ -426,7 +401,7 @@ async def process_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await status_msg.delete()
 
         # Cleanup
-        processor.cleanup(image_paths, cleaned_images, styled_images,
+        processor.cleanup(image_paths, cleaned_images,
                            video_path, pdf_path, zip_path)
 
     except Exception as e:

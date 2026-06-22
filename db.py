@@ -19,7 +19,6 @@ DEFAULT_SETTINGS = {
     "voice": "hi-female",   # hi-female, hi-male
     "bgm_enabled": True,
     "bgm_volume": 30,       # 0-100 (%)
-    "blur": 0,              # 0-100 (background blur intensity, 16:9 fit hamesha hota hai)
     "text_removal": False,  # True = panel ka text/speech-bubble hata do, False = waisa hi rakho
 }
 
