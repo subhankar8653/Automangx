@@ -15,9 +15,12 @@ from google import genai
 from google.genai import types
 from gtts import gTTS
 from moviepy.editor import (
-    ImageClip, AudioClip, AudioFileClip, AudioArrayClip, concatenate_videoclips, concatenate_audioclips,
+    ImageClip, AudioClip, AudioFileClip, concatenate_videoclips, concatenate_audioclips,
     CompositeAudioClip, CompositeVideoClip, VideoClip, VideoFileClip, afx
 )
+# moviepy 1.0.3 mein AudioArrayClip "moviepy.editor" se export nahi hoti,
+# iska actual module yahi hai — isliye alag se import kar rahe hain.
+from moviepy.audio.AudioClip import AudioArrayClip
 from pdf2image import convert_from_path
 
 logger = logging.getLogger(__name__)
