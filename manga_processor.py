@@ -1,5 +1,6 @@
 import os
 import re
+import gc
 import cv2
 import zipfile
 import numpy as np
@@ -364,6 +365,15 @@ class MangaProcessor:
                 is_rate_limit = ('429' in err_str or
                                  'quota' in err_str.lower() or
                                  'rate' in err_str.lower())
+                # 503/UNAVAILABLE = Gemini temporarily overloaded (alag
+                # cheez hai quota/rate-limit se) — yeh usually kuch second
+                # mein clear ho jaata hai, isliye chhota retry dete hain
+                # seedha fallback pe jaane se pehle (warna 8-panel manga
+                # mein kayi panels seedhe generic fallback text le lete
+                # the jab Gemini thodi der ke liye busy tha)
+                is_overloaded = ('503' in err_str or
+                                  'unavailable' in err_str.lower() or
+                                  'overloaded' in err_str.lower())
 
                 if is_rate_limit and attempt < 3:
                     wait_time = 65
@@ -371,6 +381,10 @@ class MangaProcessor:
                     if m:
                         wait_time = int(m.group(1)) + 10
                     logger.info(f"Rate limit — {wait_time}s wait karke retry...")
+                    await asyncio.sleep(wait_time)
+                elif is_overloaded and attempt < 3:
+                    wait_time = 5 * attempt  # 5s, 10s — chhota backoff
+                    logger.info(f"Gemini overloaded (503) — {wait_time}s wait karke retry...")
                     await asyncio.sleep(wait_time)
                 else:
                     break
@@ -403,6 +417,18 @@ class MangaProcessor:
         """
         Panel ko CANVAS_W (1280) width tak scale karta hai, height
         proportionally badhti hai. Vapas: (numpy array RGB, scaled_height)
+
+        IMPORTANT: Webtoon-style panels (jaise Solo Leveling) kabhi-kabhi
+        bohot lambe hote hain (ek single PDF page mein 10+ sub-panels
+        stacked). 200dpi pe extract hone ke baad aisi image ka scaled
+        height 10000px+ tak ja sakta hai — itna bada uncompressed RGB
+        numpy array RAM mein rakhna (especially jab kayi panels parallel
+        mein process/concatenate ho rahe hain) Railway ke limited-RAM
+        plan par OOM-kill aur container restart ka sabse common karan
+        hai. Isliye scaled height ko ek hard cap (MAX_PANEL_H) tak limit
+        karte hain — agar zyada lamba hai to thoda extra downscale karte
+        hain (sirf aise extreme-tall panels ke liye, normal panels par
+        koi asar nahi padega).
         """
         img = cv2.imread(img_path)
         if img is None:
@@ -411,6 +437,29 @@ class MangaProcessor:
         h, w = img.shape[:2]
         scale = CANVAS_W / w
         new_h = max(1, int(h * scale))
+
+        # Extreme-tall panels ke liye extra cap — agar scaled height
+        # MAX_PANEL_H se zyada hai, to thoda aur downscale karo (poora
+        # panel content waise hi dikhega, sirf resolution kam hogi —
+        # scroll abhi bhi proportionally sahi rahega kyunki hum sirf
+        # ek hi uniform extra-scale apply kar rahe hain).
+        MAX_PANEL_H = 6000  # ~23MB per RGB frame at CANVAS_W=1280
+        if new_h > MAX_PANEL_H:
+            extra_scale = MAX_PANEL_H / new_h
+            new_w = max(1, int(CANVAS_W * extra_scale))
+            new_h = MAX_PANEL_H
+            resized = cv2.resize(img, (new_w, new_h))
+            # Width CANVAS_W se chhota ho gaya — canvas ke beech mein rakho
+            resized_rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+            canvas = np.zeros((new_h, CANVAS_W, 3), dtype=np.uint8)
+            x_off = (CANVAS_W - new_w) // 2
+            canvas[:, x_off:x_off + new_w] = resized_rgb
+            logger.warning(
+                f"Panel bohot lamba tha, {h}px -> {new_h}px tak extra-scale "
+                f"kiya (memory cap ke liye)"
+            )
+            return canvas, new_h
+
         resized = cv2.resize(img, (CANVAS_W, new_h))
         resized_rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
         return resized_rgb, new_h
@@ -561,12 +610,24 @@ class MangaProcessor:
             raise ValueError("Images ya beats empty hain!")
 
         panel_clips = []
-        for img_path, beats in zip(image_paths, panel_beats):
+        for idx, (img_path, beats) in enumerate(zip(image_paths, panel_beats)):
             try:
                 clip = await self.create_panel_clip(img_path, beats, voice=voice)
                 panel_clips.append(clip)
             except Exception as e:
                 logger.warning(f"Panel clip error ({img_path}): {e} — skip")
+            # Har panel ke baad explicit garbage collection — tall webtoon
+            # panels ke intermediate cv2/numpy buffers turant free karne
+            # ke liye, taaki saare panels process hote waqt RAM accumulate
+            # na ho (Railway ke limited-memory plan par OOM-restart se bachne
+            # ke liye)
+            gc.collect()
+            try:
+                import resource
+                peak_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+                logger.info(f"Panel {idx + 1}/{len(image_paths)} done — peak RAM so far: {peak_mb:.0f} MB")
+            except Exception:
+                pass  # resource module Windows par nahi hota, but Railway Linux hai
 
         if not panel_clips:
             raise ValueError("Koi panel clip nahi bani!")
