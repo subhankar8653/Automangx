@@ -16,7 +16,7 @@ from google.genai import types
 from gtts import gTTS
 from moviepy.editor import (
     ImageClip, AudioClip, AudioFileClip, concatenate_videoclips, concatenate_audioclips,
-    CompositeAudioClip, CompositeVideoClip, VideoClip, afx
+    CompositeAudioClip, CompositeVideoClip, VideoClip, VideoFileClip, afx
 )
 from pdf2image import convert_from_path
 
@@ -41,12 +41,28 @@ class MangaProcessor:
                         # timeline aur actual audio dono mein EXACT same
                         # honi chahiye, warna scroll/audio drift ho jaata hai
 
+    # gemini-2.5-flash free-tier sirf 10 RPM (requests/minute) deta hai —
+    # matlab 2 calls ke beech kam se kam 6 second ka gap chahiye. Pehle
+    # hum calls jitni fast ho sake bhej dete the aur 429 aane ka wait
+    # karte the (jisme har retry 65s leta tha — bohot slow). Ab proactively
+    # har call se pehle thoda wait karte hain taaki 429 hi kam aaye.
+    MIN_GEMINI_GAP = 6.5  # seconds, 10 RPM se thoda zyada margin ke saath
+
+    AUDIO_SPEED = 1.5  # voice playback speed multiplier — TTS audio
+                        # generate hone ke turant baad isi speed se
+                        # permanently speed-up kar dete hain, taaki
+                        # duration/timeline calculation (jo audio ki
+                        # actual file-duration use karte hain) automatically
+                        # sahi (chhoti) duration dekhein — kahin aur extra
+                        # speed-adjustment ki zaroorat nahi padti
+
     def __init__(self):
         # gemini-2.0-flash 1 June 2026 ko shutdown ho gaya tha — isliye
         # gemini-2.5-flash use kar rahe hain (same price jo 2.0-flash ka
         # tha: $0.10/$0.40 per million tokens, behtar output limit bhi)
         self.model_name = 'gemini-2.5-flash'
         self.temp_files = []
+        self._last_gemini_call_time = 0.0
 
     # ─────────────────────────────────────────
     # 1. PDF → Images
@@ -143,6 +159,59 @@ class MangaProcessor:
 
         logger.info(f"ZIP se {len(image_paths)} images nikali")
         return image_paths
+
+    # ─────────────────────────────────────────
+    # 1c. Blank / text-only panels filter out karo
+    # ─────────────────────────────────────────
+    # Kuch PDFs mein occasionally ek poora page sirf EK speech-bubble ya
+    # text-recap ke liye hota hai — koi actual manga artwork nahi, sirf
+    # plain white background + ek bubble (jaise "Dannazione..." jaisa
+    # transition/recap panel). Aise panels video mein dikhana waste hai —
+    # viewer ko sirf ek khaali white frame dikhta hai jab voice bol rahi
+    # hoti hai.
+    #
+    # Detection heuristic: agar image ka 97%+ area near-white hai (sirf
+    # thoda sa black text/lines), to woh likely ek blank/text-only panel
+    # hai, real artwork nahi. Threshold deliberately HIGH (97%) rakha hai
+    # taaki genuine minimalist-style manga panels (jo legitimately safed
+    # background use karte hain par real character/art bhi hota hai)
+    # galti se skip na ho jaayein — sirf EXTREME cases catch karte hain.
+    BLANK_PANEL_WHITE_RATIO = 0.97
+
+    def is_blank_panel(self, img_path: str) -> bool:
+        try:
+            img = cv2.imread(img_path)
+            if img is None:
+                return False
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            white_pixels = np.sum(gray > 240)
+            total_pixels = gray.size
+            white_ratio = white_pixels / total_pixels if total_pixels else 0
+            return white_ratio >= self.BLANK_PANEL_WHITE_RATIO
+        except Exception as e:
+            logger.warning(f"Blank-panel check error ({img_path}): {e} — safe side, blank NAHI maante")
+            return False
+
+    def filter_blank_panels(self, image_paths: list, *parallel_lists) -> tuple:
+        """
+        image_paths ke saath-saath jitni bhi parallel lists diye jaayein
+        (jaise cleaned_images), sabko SAME index par filter karta hai —
+        taaki saari lists sync rahein.
+
+        Returns: (filtered_image_paths, filtered_parallel_list1, ...)
+        """
+        keep_indices = []
+        for i, p in enumerate(image_paths):
+            if self.is_blank_panel(p):
+                logger.info(f"Blank/text-only panel skip kiya: {os.path.basename(p)}")
+            else:
+                keep_indices.append(i)
+
+        filtered_main = [image_paths[i] for i in keep_indices]
+        filtered_others = tuple(
+            [lst[i] for i in keep_indices] for lst in parallel_lists
+        )
+        return (filtered_main,) + filtered_others
 
     # ─────────────────────────────────────────
     # 2. Text Removal (OpenCV) — optional, settings se control hota hai
@@ -269,7 +338,16 @@ class MangaProcessor:
             "6. Agar panel mein bilkul koi text/bubble nahi hai (sirf art "
             "hai), to scene ko apne style mein dramatically describe kar — "
             "kya ho raha hai, characters kaise feel kar rahe hain, kya "
-            "tension build ho raha hai — generic line KABHI mat de.\n\n"
+            "tension build ho raha hai — generic line KABHI mat de.\n"
+            "7. CONCISE rakh — personality aur energy ke naam par lambi "
+            "lines mat bana. Episode already kaafi lamba ho jaata hai "
+            "agar har beat 2-3 sentence ka ho jaaye. Jo bhi reaction/"
+            "rhetorical-sawaal/filler daal rahe ho (rule 4), use EK CHHOTI "
+            "phrase mein fit kar do — pura alag sentence mat bana usi ke "
+            "liye. Har beat ideally EK hi sentence mein poora ho (zaroorat "
+            "pade tabhi 2 chhote sentences), aur sirf woh information jo "
+            "is exact panel-portion ke liye zaroori hai — repeat ya "
+            "already-bola-hua context dobara mat bata.\n\n"
             "Panel ko TOP se BOTTOM tak 'beats' mein todo — har beat ek "
             "chhota narration-chunk hai jo panel ke specific vertical hisse "
             "se related hai. 2 bubbles (upar-niche) hain to kam se kam 2 "
@@ -298,8 +376,17 @@ class MangaProcessor:
 
         for attempt in range(1, 4):
             try:
+                # Proactive throttle — pichli Gemini call se kam se kam
+                # MIN_GEMINI_GAP second ka gap rakho, taaki 10 RPM free-tier
+                # limit khud hi cross na karein (429 aane ka wait karne se
+                # behtar hai pehle se thoda slow chalna)
+                elapsed = time.time() - self._last_gemini_call_time
+                if elapsed < self.MIN_GEMINI_GAP:
+                    await asyncio.sleep(self.MIN_GEMINI_GAP - elapsed)
+
                 logger.info(f"Gemini panel-script call attempt {attempt}/3")
                 loop = asyncio.get_event_loop()
+                self._last_gemini_call_time = time.time()
                 response = await loop.run_in_executor(
                     None, lambda: genai_client.models.generate_content(
                         model=self.model_name,
@@ -406,8 +493,32 @@ class MangaProcessor:
     async def text_to_speech(self, text: str, output_path: str, voice: str = "hi-female"):
         tld = self.VOICE_TLD_MAP.get(voice, "co.in")
         loop = asyncio.get_event_loop()
+
         def _gen():
             gTTS(text=text, lang='hi', tld=tld, slow=False).save(output_path)
+
+            # Voice ko AUDIO_SPEED (1.5x) tak speed-up karte hain — yeh
+            # yahan karna isliye zaroori hai (na ki baad mein final video
+            # pe), kyunki create_panel_clip mein scroll-timeline isi audio
+            # file ki duration padh ke banti hai. Agar speed-up baad mein
+            # karte to scroll/audio phir se out-of-sync ho jaata.
+            if self.AUDIO_SPEED and self.AUDIO_SPEED != 1.0:
+                sped_path = output_path + '.sped.mp3'
+                try:
+                    raw_clip = AudioFileClip(output_path)
+                    fast_clip = raw_clip.fx(afx.audio_speedx, self.AUDIO_SPEED)
+                    fast_clip.write_audiofile(sped_path, logger=None)
+                    raw_clip.close()
+                    fast_clip.close()
+                    os.replace(sped_path, output_path)
+                except Exception as e:
+                    logger.warning(f"Audio speed-up fail ({e}) — normal-speed audio use kar raha hoon")
+                    if os.path.exists(sped_path):
+                        try:
+                            os.remove(sped_path)
+                        except Exception:
+                            pass
+
         await loop.run_in_executor(None, _gen)
 
     # ─────────────────────────────────────────
@@ -593,51 +704,124 @@ class MangaProcessor:
         return video_clip
 
     # ─────────────────────────────────────────
-    # 7. Pura video banao — saare panels ke scroll-clips jodke + BGM
+    # 7. Pura video banao — har panel ko ALAG se render karke disk pe
+    #    save karte hain, fir saari chhoti files ko merge karte hain
     # ─────────────────────────────────────────
+    # IMPORTANT — yeh function pehle saare 8 panels ke VideoClip objects
+    # (jo apna poora uncompressed RGB numpy array RAM mein hold karte
+    # hain) ek list mein jod ke rakhta tha, fir EK saath concatenate +
+    # render karta tha. Matlab jab tak video poori nahi ban jaati, RAM
+    # mein saare panels ka combined data ek saath baitha rehta tha.
+    #
+    # Ab naya approach (chunk-render-then-merge):
+    #   1. Har panel ko ALAG se render karo -> chhoti _part_N.mp4 file
+    #      disk par save ho jaati hai
+    #   2. Us panel ka clip/numpy array IMMEDIATELY close + gc karo —
+    #      RAM se hat jaata hai, sirf disk par chhoti mp4 file reh
+    #      jaati hai
+    #   3. Saare panels render hone ke baad, un chhoti mp4 files ko
+    #      VideoFileClip se (disk-backed, RAM-light) reload karke
+    #      concatenate karo aur final video banao
+    #
+    # Isse peak RAM ~1 panel ke barabar rehta hai, saare panels ka sum
+    # nahi — jitne bhi panels hon (8 ho ya 20), memory same rahegi.
     async def create_video_from_panels(self, image_paths: list,
                                         panel_beats: list,
                                         quality_height: int = 720,
                                         voice: str = "hi-female",
                                         bgm_enabled: bool = True,
-                                        bgm_volume: int = 30) -> str:
+                                        bgm_volume: int = 30,
+                                        progress_callback=None) -> str:
         """
         image_paths: har panel ki image path
         panel_beats: same length list, har entry list-of-beats hai
                      (generate_panel_script se aaya)
+        progress_callback: optional async function(done, total) — har
+                     panel render hone ke baad call hota hai, taaki bot.py
+                     Telegram status message update kar sake ("Panel 3/8
+                     ban gaya")
         """
         if not image_paths or not panel_beats:
             raise ValueError("Images ya beats empty hain!")
 
-        panel_clips = []
+        loop = asyncio.get_event_loop()
+        part_paths = []
+
+        # ── Step 1: Har panel ko ALAG render karo, disk pe save karo, RAM free karo ──
         for idx, (img_path, beats) in enumerate(zip(image_paths, panel_beats)):
+            clip = None
             try:
                 clip = await self.create_panel_clip(img_path, beats, voice=voice)
-                panel_clips.append(clip)
+
+                part_tmp = tempfile.NamedTemporaryFile(
+                    suffix=f'_part{idx}.mp4', delete=False)
+                part_path = part_tmp.name
+                part_tmp.close()
+                self.temp_files.append(part_path)
+
+                part_audio_tmp = os.path.join(
+                    tempfile.gettempdir(),
+                    f'manga_part_audio_{os.getpid()}_{idx}.m4a')
+                self.temp_files.append(part_audio_tmp)
+
+                await loop.run_in_executor(
+                    None,
+                    lambda c=clip, p=part_path, pa=part_audio_tmp: c.write_videofile(
+                        p,
+                        fps=24,
+                        codec='libx264',
+                        audio_codec='aac',
+                        temp_audiofile=pa,
+                        remove_temp=True,
+                        threads=2,
+                        preset='ultrafast',
+                        verbose=False,
+                        logger=None,
+                    )
+                )
+                part_paths.append(part_path)
+                logger.info(f"Panel {idx + 1}/{len(image_paths)} render ho gaya -> {os.path.basename(part_path)}")
+
             except Exception as e:
                 logger.warning(f"Panel clip error ({img_path}): {e} — skip")
-            # Har panel ke baad explicit garbage collection — tall webtoon
-            # panels ke intermediate cv2/numpy buffers turant free karne
-            # ke liye, taaki saare panels process hote waqt RAM accumulate
-            # na ho (Railway ke limited-memory plan par OOM-restart se bachne
-            # ke liye)
-            gc.collect()
-            try:
-                import resource
-                peak_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
-                logger.info(f"Panel {idx + 1}/{len(image_paths)} done — peak RAM so far: {peak_mb:.0f} MB")
-            except Exception:
-                pass  # resource module Windows par nahi hota, but Railway Linux hai
+            finally:
+                # Yeh panel ka numpy array/audio RAM se IMMEDIATELY hatao,
+                # agle panel pe jaane se pehle — yahi is fix ka core hai
+                if clip is not None:
+                    try:
+                        clip.close()
+                    except Exception:
+                        pass
+                    del clip
+                gc.collect()
+                try:
+                    import resource
+                    peak_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+                    logger.info(f"Panel {idx + 1}/{len(image_paths)} done — peak RAM so far: {peak_mb:.0f} MB")
+                except Exception:
+                    pass
+                if progress_callback:
+                    try:
+                        await progress_callback(idx + 1, len(image_paths))
+                    except Exception as e:
+                        logger.warning(f"Progress callback error: {e}")
 
-        if not panel_clips:
+        if not part_paths:
             raise ValueError("Koi panel clip nahi bani!")
 
+        # ── Step 2: Chhoti mp4 parts ko disk-backed clips ki tarah reload karo ──
+        # VideoFileClip disk se stream karta hai, poora numpy array RAM mein
+        # nahi rakhta — isliye 8 parts ko bhi ek saath khol ke rakhna safe hai
         final_video = None
         bgm_clip = None
         output_path = None
+        part_clips = []
 
         try:
-            final_video = concatenate_videoclips(panel_clips, method="compose")
+            for p in part_paths:
+                part_clips.append(VideoFileClip(p))
+
+            final_video = concatenate_videoclips(part_clips, method="compose")
 
             # Quality scale (height ke hisaab se, aspect ratio 16:9 maintain)
             if quality_height and quality_height != CANVAS_H:
@@ -674,7 +858,6 @@ class MangaProcessor:
                 f'manga_audio_tmp_{os.getpid()}.m4a')
             self.temp_files.append(temp_audio)
 
-            loop = asyncio.get_event_loop()
             await loop.run_in_executor(
                 None,
                 lambda: final_video.write_videofile(
@@ -705,11 +888,12 @@ class MangaProcessor:
                     final_video.close()
                 except Exception:
                     pass
-            for clip in panel_clips:
+            for clip in part_clips:
                 try:
                     clip.close()
                 except Exception:
                     pass
+            gc.collect()
 
     # ─────────────────────────────────────────
     # 8. Cleanup

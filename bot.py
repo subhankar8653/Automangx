@@ -337,6 +337,18 @@ async def process_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 None, processor.zip_to_images, zip_path
             )
 
+        # Step 1b: Blank/text-only panels filter karo (jaise sirf-bubble
+        # wale recap panels, koi actual artwork nahi) — yeh extraction ke
+        # turant baad karte hain taaki aage Gemini script-generation aur
+        # video-rendering steps mein bhi yeh panels skip ho jaayein
+        # (Gemini quota bhi bachta hai aise panels pe waste hone se)
+        if image_paths:
+            (image_paths,) = await loop.run_in_executor(
+                None, processor.filter_blank_panels, image_paths
+            )
+            if not image_paths:
+                raise ValueError("Saare panels blank/text-only nikle — koi actual artwork nahi mila!")
+
         # Step 2: Remove text from panels (settings ke hisaab se — optional)
         if settings.get('text_removal'):
             await status_msg.edit_text(
@@ -393,9 +405,26 @@ async def process_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE,
             "✅ Step 2/4: Panel text settings apply ho gayi!\n"
             "✅ Step 3/4: Explainer-script taiyar!\n"
             "⏳ Step 4/4: Voice, scroll-sync aur BGM se video ban rahi hai... "
-            "(thoda time lagega)",
+            f"(0/{len(cleaned_images)})",
             parse_mode='Markdown'
         )
+
+        async def _video_progress(done: int, total: int):
+            # Har panel pe edit nahi karte (Telegram rate-limit lag sakti
+            # hai) — sirf har 2 panels ya last panel par update karte hain,
+            # jaisa Step 3 mein bhi karte hain
+            if done % 2 == 0 or done == total:
+                try:
+                    await status_msg.edit_text(
+                        "🎬 *Video ban rahi hai...*\n\n"
+                        "✅ Step 1/4: Images ready!\n"
+                        "✅ Step 2/4: Panel text settings apply ho gayi!\n"
+                        "✅ Step 3/4: Explainer-script taiyar!\n"
+                        f"⏳ Step 4/4: Panel render ho rahe hain ({done}/{total})...",
+                        parse_mode='Markdown'
+                    )
+                except Exception:
+                    pass  # rate-limit pe edit fail ho sakta hai, ignore karo
 
         quality_height = QUALITY_OPTIONS.get(settings['quality'], 720)
         video_path = await processor.create_video_from_panels(
@@ -404,6 +433,7 @@ async def process_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE,
             voice=settings['voice'],
             bgm_enabled=settings['bgm_enabled'],
             bgm_volume=settings['bgm_volume'],
+            progress_callback=_video_progress,
         )
 
         # Send video
