@@ -61,7 +61,7 @@ DEFAULT_BGM_PATH = os.path.join(
 
 IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.webp', '.bmp')
 
-CANVAS_W, CANVAS_H = 1280, 720  # 16:9 video canvas
+CANVAS_W, CANVAS_H = 720, 1280  # 9:16 vertical canvas (Shorts/Reels style)
 
 
 class MangaProcessor:
@@ -755,54 +755,55 @@ class MangaProcessor:
     # ─────────────────────────────────────────
     def _load_scaled_panel(self, img_path: str):
         """
-        Panel ko CANVAS_W (1280) width tak scale karta hai, height
-        proportionally badhti hai. Vapas: (numpy array RGB, scaled_height)
+        9:16 Shorts/Reels style rendering:
+        - Foreground: panel ko canvas width (720) fit karo, aspect maintain
+        - Background: same panel ko gaussian blur ke saath full 720x1280 fill karo
+        - Returns: (fg_rgb, bg_rgb, fg_h)
+          fg_rgb = foreground panel (720 wide, proportional height)
+          bg_rgb = blurred background (720x1280 full canvas)
+          fg_h   = foreground panel height (scroll range ke liye)
 
-        IMPORTANT: Webtoon-style panels (jaise Solo Leveling) kabhi-kabhi
-        bohot lambe hote hain (ek single PDF page mein 10+ sub-panels
-        stacked). 200dpi pe extract hone ke baad aisi image ka scaled
-        height 10000px+ tak ja sakta hai — itna bada uncompressed RGB
-        numpy array RAM mein rakhna (especially jab kayi panels parallel
-        mein process/concatenate ho rahe hain) Railway ke limited-RAM
-        plan par OOM-kill aur container restart ka sabse common karan
-        hai. Isliye scaled height ko ek hard cap (MAX_PANEL_H) tak limit
-        karte hain — agar zyada lamba hai to thoda extra downscale karte
-        hain (sirf aise extreme-tall panels ke liye, normal panels par
-        koi asar nahi padega).
+        Memory cap: webtoon-style extra-tall panels ko 5000px pe clamp karo.
         """
         img = cv2.imread(img_path)
         if img is None:
-            # Blank fallback frame
-            img = np.zeros((CANVAS_H, CANVAS_W, 3), dtype=np.uint8)
+            blank = np.zeros((CANVAS_H, CANVAS_W, 3), dtype=np.uint8)
+            return blank, blank, CANVAS_H
+
         h, w = img.shape[:2]
-        scale = CANVAS_W / w
-        new_h = max(1, int(h * scale))
 
-        # Extreme-tall panels ke liye extra cap — agar scaled height
-        # MAX_PANEL_H se zyada hai, to thoda aur downscale karo (poora
-        # panel content waise hi dikhega, sirf resolution kam hogi —
-        # scroll abhi bhi proportionally sahi rahega kyunki hum sirf
-        # ek hi uniform extra-scale apply kar rahe hain).
-        MAX_PANEL_H = 6000  # ~23MB per RGB frame at CANVAS_W=1280
-        if new_h > MAX_PANEL_H:
-            extra_scale = MAX_PANEL_H / new_h
-            new_w = max(1, int(CANVAS_W * extra_scale))
-            new_h = MAX_PANEL_H
-            resized = cv2.resize(img, (new_w, new_h))
-            # Width CANVAS_W se chhota ho gaya — canvas ke beech mein rakho
-            resized_rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-            canvas = np.zeros((new_h, CANVAS_W, 3), dtype=np.uint8)
-            x_off = (CANVAS_W - new_w) // 2
-            canvas[:, x_off:x_off + new_w] = resized_rgb
-            logger.warning(
-                f"Panel bohot lamba tha, {h}px -> {new_h}px tak extra-scale "
-                f"kiya (memory cap ke liye)"
-            )
-            return canvas, new_h
+        # ── Foreground: width = CANVAS_W, height proportional ──
+        fg_scale = CANVAS_W / w
+        fg_h = max(1, int(h * fg_scale))
 
-        resized = cv2.resize(img, (CANVAS_W, new_h))
-        resized_rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-        return resized_rgb, new_h
+        MAX_PANEL_H = 5000
+        if fg_h > MAX_PANEL_H:
+            extra = MAX_PANEL_H / fg_h
+            fg_h = MAX_PANEL_H
+            fg_w = max(1, int(CANVAS_W * extra))
+            fg_resized = cv2.resize(img, (fg_w, fg_h))
+            fg_rgb = np.zeros((fg_h, CANVAS_W, 3), dtype=np.uint8)
+            x_off = (CANVAS_W - fg_w) // 2
+            fg_rgb[:, x_off:x_off + fg_w] = cv2.cvtColor(fg_resized, cv2.COLOR_BGR2RGB)
+            logger.warning(f"Panel capped: {h}px -> {fg_h}px")
+        else:
+            fg_resized = cv2.resize(img, (CANVAS_W, fg_h))
+            fg_rgb = cv2.cvtColor(fg_resized, cv2.COLOR_BGR2RGB)
+
+        # ── Background: cover-fill 720x1280, then heavy blur ──
+        bg_scale = max(CANVAS_W / w, CANVAS_H / h)
+        bg_w = max(1, int(w * bg_scale))
+        bg_h_raw = max(1, int(h * bg_scale))
+        bg_resized = cv2.resize(img, (bg_w, bg_h_raw))
+        cx = (bg_w - CANVAS_W) // 2
+        cy = (bg_h_raw - CANVAS_H) // 2
+        bg_crop = bg_resized[cy:cy + CANVAS_H, cx:cx + CANVAS_W]
+        blur_k = 71  # must be odd
+        bg_blurred = cv2.GaussianBlur(bg_crop, (blur_k, blur_k), 0)
+        bg_blurred = (bg_blurred * 0.45).clip(0, 255).astype(np.uint8)
+        bg_rgb = cv2.cvtColor(bg_blurred, cv2.COLOR_BGR2RGB)
+
+        return fg_rgb, bg_rgb, fg_h
 
     # ─────────────────────────────────────────
     # 6. Ek panel ke liye scroll-synced video clip banao
@@ -816,8 +817,8 @@ class MangaProcessor:
     #   4. Agar panel ki scaled height <= CANVAS_H (chhota panel), to scroll
     #      ki zaroorat nahi — halka cinematic zoom-in de dete hain
     async def create_panel_clip(self, img_path: str, beats: list, voice: str = "hi-female"):
-        panel_rgb, scaled_h = self._load_scaled_panel(img_path)
-        scroll_range = max(0, scaled_h - CANVAS_H)
+        fg_rgb, bg_rgb, fg_h = self._load_scaled_panel(img_path)
+        scroll_range = max(0, fg_h - CANVAS_H)
 
         # ── Step 1: Har beat ka audio banao, duration nikaalo ──
         # CRITICAL: duration sirf TTS return value se lo — AudioFileClip se
@@ -941,69 +942,165 @@ class MangaProcessor:
         def get_y_at_time(t):
             if scroll_range <= 0 or not timeline:
                 return 0
-            # t se pehle ya exact match karne wala segment dhoondo
-            # (index track karte hain taaki prev_y accurate mile)
-            active_idx = len(timeline) - 1  # default: last segment
+            active_idx = len(timeline) - 1
             for i, seg in enumerate(timeline):
                 if t <= seg["end"]:
                     active_idx = i
                     break
             seg = timeline[active_idx]
             seg_dur = seg["end"] - seg["start"]
-            # Smooth scroll: pichli position se is position tak 30% duration mein
             transition_time = min(0.4, seg_dur * 0.3) if seg_dur > 0 else 0
             if active_idx > 0 and transition_time > 0 and t < seg["start"] + transition_time:
                 prev_y = timeline[active_idx - 1]["y"]
                 progress = (t - seg["start"]) / transition_time
                 progress = max(0.0, min(1.0, progress))
-                # Ease-out cubic: fast start, slow finish — natural feel
                 progress = 1 - (1 - progress) ** 3
                 return int(prev_y + (seg["y"] - prev_y) * progress)
             return seg["y"]
 
-        # ── Step 5: Frame-generator function (moviepy VideoClip ke liye) ──
+        # ── Step 5: Frame-generator — 9:16 blurred bg + Ken Burns zoom ──
+        # Dono cases (scroll + no-scroll) mein:
+        #   - bg_rgb (blurred, full 720x1280) pehle daal do
+        #   - fg panel uske upar center mein composite karo
+        #   - Ken Burns: gentle 5% zoom-in over clip duration
+
+        def _composite_frame(fg_crop, bg_frame):
+            """fg_crop ko bg_frame ke upar center mein baith ke composite karo."""
+            frame = bg_frame.copy()
+            fh, fw = fg_crop.shape[:2]
+            # fg ko canvas ke center mein rakho (vertically bhi center)
+            y_off = max(0, (CANVAS_H - fh) // 2)
+            x_off = max(0, (CANVAS_W - fw) // 2)
+            y_end = min(CANVAS_H, y_off + fh)
+            x_end = min(CANVAS_W, x_off + fw)
+            fg_h_use = y_end - y_off
+            fg_w_use = x_end - x_off
+            frame[y_off:y_end, x_off:x_end] = fg_crop[:fg_h_use, :fg_w_use]
+            return frame
+
+        def _ken_burns(source_frame, t, dur, zoom_max=0.05):
+            """source_frame ko gentle zoom-in karo (Ken Burns effect)."""
+            if dur <= 0:
+                return source_frame
+            zoom = 1.0 + zoom_max * (t / dur)
+            if abs(zoom - 1.0) < 0.001:
+                return source_frame
+            sh, sw = source_frame.shape[:2]
+            zh = int(sh * zoom)
+            zw = int(sw * zoom)
+            zoomed = cv2.resize(source_frame, (zw, zh))
+            cy = (zh - sh) // 2
+            cx = (zw - sw) // 2
+            return zoomed[cy:cy + sh, cx:cx + sw]
+
         if scroll_range <= 0:
-            # Chhota panel (height < CANVAS_H) — CANVAS_H tak scale-up karo
-            # taaki black bars na dikhe. Aspect ratio maintain karte hue
-            # width fit karo, aur gentle zoom-in animation dete hain.
-            scale_up = CANVAS_H / max(scaled_h, 1)
+            # Chhota panel — full CANVAS_H tak scale-up karo, center mein rakho
+            scale_up = CANVAS_H / max(fg_h, 1)
             up_h = CANVAS_H
             up_w = max(1, int(CANVAS_W * scale_up))
-            # Agar scale_up > 1: panel chota tha, bada kar rahe hain
-            # Agar scale_up <= 1: panel already CANVAS_H ke barabar ya bada
-            panel_up = cv2.resize(panel_rgb, (up_w, up_h))
+            panel_up = cv2.resize(fg_rgb, (up_w, up_h))
 
-            # x-center: agar up_w > CANVAS_W to center crop, warna letterbox
             if up_w >= CANVAS_W:
                 x_off = (up_w - CANVAS_W) // 2
-                base_frame = panel_up[:, x_off:x_off + CANVAS_W]
+                base_fg = panel_up[:, x_off:x_off + CANVAS_W]
             else:
-                base_frame = np.zeros((CANVAS_H, CANVAS_W, 3), dtype=np.uint8)
+                base_fg = np.zeros((CANVAS_H, CANVAS_W, 3), dtype=np.uint8)
                 x_pad = (CANVAS_W - up_w) // 2
-                base_frame[:, x_pad:x_pad + up_w] = panel_up
+                base_fg[:, x_pad:x_pad + up_w] = panel_up
 
             def make_frame(t):
-                # Gentle 4% zoom-in over entire clip duration
-                zoom = 1.0 + 0.04 * (t / max(actual_duration, 0.01))
-                if abs(zoom - 1.0) < 0.001:
-                    return base_frame
-                zh = int(CANVAS_H * zoom)
-                zw = int(CANVAS_W * zoom)
-                zoomed = cv2.resize(base_frame, (zw, zh))
-                cy = (zh - CANVAS_H) // 2
-                cx = (zw - CANVAS_W) // 2
-                return zoomed[cy:cy + CANVAS_H, cx:cx + CANVAS_W]
+                # Ken Burns on full-canvas composite
+                composite = _composite_frame(base_fg, bg_rgb)
+                return _ken_burns(composite, t, actual_duration, zoom_max=0.05)
         else:
             def make_frame(t):
                 y = get_y_at_time(t)
                 y = max(0, min(scroll_range, y))
-                return panel_rgb[y:y + CANVAS_H, 0:CANVAS_W]
-
+                # Visible slice of fg panel
+                fg_slice = fg_rgb[y:y + CANVAS_H, 0:CANVAS_W]
+                # Composite on blurred bg
+                composite = _composite_frame(fg_slice, bg_rgb)
+                # Ken Burns on the composite
+                return _ken_burns(composite, t, actual_duration, zoom_max=0.03)
         video_clip = VideoClip(make_frame, duration=actual_duration)
         if audio_clip:
             video_clip = video_clip.set_audio(audio_clip)
 
         return video_clip
+
+    # ─────────────────────────────────────────
+    # 6b. Intro title screen clip
+    # ─────────────────────────────────────────
+    def _make_intro_clip(self, title: str, duration: float = 3.0):
+        """
+        720x1280 black intro screen jisme:
+        - Title text centered
+        - Subtle gradient overlay
+        Returns: moviepy VideoClip (no audio)
+        """
+        from PIL import Image as PILImage, ImageDraw, ImageFont
+        import textwrap
+
+        frame = np.zeros((CANVAS_H, CANVAS_W, 3), dtype=np.uint8)
+
+        # Gradient: top dark, middle slightly lighter
+        for y in range(CANVAS_H):
+            val = int(15 + 20 * (y / CANVAS_H))
+            frame[y, :] = [val, val, val]
+
+        # PIL mein convert karo text ke liye
+        pil_img = PILImage.fromarray(frame)
+        draw = ImageDraw.Draw(pil_img)
+
+        # Font — system default use karo (PIL ka default)
+        try:
+            font_big = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 52)
+            font_sub = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 28)
+        except Exception:
+            font_big = ImageFont.load_default()
+            font_sub = font_big
+
+        # Title wrap
+        wrapped = textwrap.wrap(title, width=18) or [title]
+        line_h = 65
+        total_h = len(wrapped) * line_h
+        y_start = (CANVAS_H - total_h) // 2 - 40
+
+        # Red accent line above title
+        accent_y = y_start - 30
+        draw.rectangle([(CANVAS_W // 2 - 60, accent_y), (CANVAS_W // 2 + 60, accent_y + 4)],
+                        fill=(220, 30, 30))
+
+        for i, line in enumerate(wrapped):
+            bbox = draw.textbbox((0, 0), line, font=font_big)
+            tw = bbox[2] - bbox[0]
+            x = (CANVAS_W - tw) // 2
+            y = y_start + i * line_h
+            # Shadow
+            draw.text((x + 3, y + 3), line, font=font_big, fill=(0, 0, 0, 180))
+            draw.text((x, y), line, font=font_big, fill=(255, 255, 255))
+
+        # Subtitle
+        sub_text = "📖 Manga Story"
+        bbox2 = draw.textbbox((0, 0), sub_text, font=font_sub)
+        sw = bbox2[2] - bbox2[0]
+        draw.text(((CANVAS_W - sw) // 2, y_start + total_h + 20), sub_text,
+                    font=font_sub, fill=(180, 180, 180))
+
+        intro_arr = np.array(pil_img)
+
+        def make_intro_frame(t):
+            # Fade-in first 0.5s, fade-out last 0.5s
+            alpha = 1.0
+            if t < 0.5:
+                alpha = t / 0.5
+            elif t > duration - 0.5:
+                alpha = (duration - t) / 0.5
+            alpha = max(0.0, min(1.0, alpha))
+            return (intro_arr * alpha).astype(np.uint8)
+
+        return VideoClip(make_intro_frame, duration=duration)
+
 
     # ─────────────────────────────────────────
     # 7. Pura video banao — har panel ko ALAG se render karke disk pe
@@ -1048,6 +1145,30 @@ class MangaProcessor:
 
         loop = asyncio.get_event_loop()
         part_paths = []
+
+        # ── Step 0: Intro title screen (optional) ──
+        story_title = getattr(self, '_current_story_title', None) or "Manga Story"
+        intro_part_path = None
+        try:
+            intro_clip = self._make_intro_clip(story_title, duration=3.0)
+            intro_tmp = tempfile.NamedTemporaryFile(suffix='_intro.mp4', delete=False)
+            intro_part_path = intro_tmp.name
+            intro_tmp.close()
+            self.temp_files.append(intro_part_path)
+            intro_audio_tmp = os.path.join(tempfile.gettempdir(), f'manga_intro_audio_{os.getpid()}.m4a')
+            self.temp_files.append(intro_audio_tmp)
+            await loop.run_in_executor(
+                None,
+                lambda c=intro_clip, p=intro_part_path, pa=intro_audio_tmp: c.write_videofile(
+                    p, fps=24, codec='libx264', audio_codec='aac',
+                    temp_audiofile=pa, remove_temp=True,
+                    threads=2, preset='ultrafast', verbose=False, logger=None,
+                )
+            )
+            logger.info("Intro screen render ho gaya")
+        except Exception as e:
+            logger.warning(f"Intro clip error: {e} — skip kar raha hoon")
+            intro_part_path = None
 
         # ── Step 1: Har panel ko ALAG render karo, disk pe save karo, RAM free karo ──
         for idx, (img_path, beats) in enumerate(zip(image_paths, panel_beats)):
@@ -1133,6 +1254,8 @@ class MangaProcessor:
                 mode='w', suffix='_concat.txt', delete=False)
             concat_list_path = concat_list_f.name
             self.temp_files.append(concat_list_path)
+            if intro_part_path and os.path.exists(intro_part_path):
+                concat_list_f.write(f"file '{intro_part_path}'\n")
             for p in part_paths:
                 concat_list_f.write(f"file '{p}'\n")
             concat_list_f.close()
@@ -1140,10 +1263,12 @@ class MangaProcessor:
             # Quality scale: agar quality_height 720 se alag ho to scale karo
             vf_filter = ""
             if quality_height and quality_height != CANVAS_H:
-                aspect = CANVAS_W / CANVAS_H
+                # 9:16 vertical — width = quality_height * (9/16)
+                aspect = CANVAS_W / CANVAS_H  # 720/1280 = 0.5625
                 new_w = int(quality_height * aspect)
                 new_w = new_w if new_w % 2 == 0 else new_w + 1
-                vf_filter = f"scale={new_w}:{quality_height}"
+                new_h = quality_height if quality_height % 2 == 0 else quality_height + 1
+                vf_filter = f"scale={new_w}:{new_h}"
 
             has_bgm = bgm_enabled and os.path.exists(DEFAULT_BGM_PATH)
 
