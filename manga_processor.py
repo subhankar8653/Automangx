@@ -43,17 +43,59 @@ class MangaProcessor:
     # 1. PDF → Images
     # ─────────────────────────────────────────
     def pdf_to_images(self, pdf_path: str) -> list:
-        # DPI 200+ aur high JPEG quality — taaki speech-bubble ka chhota text
-        # bhi Gemini ko clearly dikhe (150dpi/q85 par fine text blur ho jaata
-        # hai aur Gemini text padh nahi paata, fallback pe chala jaata hai)
-        pages = convert_from_path(pdf_path, dpi=220)
+        # DPI 200 — taaki speech-bubble ka chhota text bhi Gemini ko clearly
+        # dikhe (150dpi par fine text blur ho jaata hai). 220 se thoda kam
+        # rakha (200) taaki bade PDFs par memory/time issue na ho Railway
+        # jaise limited-resource environment mein.
+        try:
+            from pdf2image import pdfinfo_from_path
+            info = pdfinfo_from_path(pdf_path)
+            total_pages = info.get("Pages", 0)
+            logger.info(f"PDF mein total {total_pages} pages hain")
+        except Exception as e:
+            logger.warning(f"pdfinfo error: {e} — page count nahi mila, continue kar rahe")
+            total_pages = 0
+
         image_paths = []
-        for i, page in enumerate(pages):
-            tmp = tempfile.NamedTemporaryFile(suffix=f'_page{i}.jpg', delete=False)
-            page.save(tmp.name, 'JPEG', quality=95)
-            image_paths.append(tmp.name)
-            self.temp_files.append(tmp.name)
-        logger.info(f"PDF se {len(image_paths)} pages nikale (220dpi, q95)")
+
+        # Bahut bade PDFs (50+ pages) ko ek saath load karna risky hai
+        # (memory + time) — isliye chunks mein process karte hain, ek-ek
+        # page convert karke turant save karte hain.
+        if total_pages > 0:
+            for page_num in range(1, total_pages + 1):
+                try:
+                    pages = convert_from_path(
+                        pdf_path, dpi=200,
+                        first_page=page_num, last_page=page_num
+                    )
+                    if not pages:
+                        logger.warning(f"Page {page_num} convert nahi hui — skip")
+                        continue
+                    tmp = tempfile.NamedTemporaryFile(
+                        suffix=f'_page{page_num}.jpg', delete=False)
+                    pages[0].save(tmp.name, 'JPEG', quality=92)
+                    image_paths.append(tmp.name)
+                    self.temp_files.append(tmp.name)
+                except Exception as e:
+                    logger.error(f"Page {page_num} conversion error: {e} — skip kar raha hoon")
+                    continue
+        else:
+            # Fallback: pdfinfo fail hua to purana bulk-convert tareeka
+            try:
+                pages = convert_from_path(pdf_path, dpi=200)
+                for i, page in enumerate(pages):
+                    tmp = tempfile.NamedTemporaryFile(suffix=f'_page{i}.jpg', delete=False)
+                    page.save(tmp.name, 'JPEG', quality=92)
+                    image_paths.append(tmp.name)
+                    self.temp_files.append(tmp.name)
+            except Exception as e:
+                logger.error(f"Bulk PDF conversion error: {e}")
+                raise ValueError(f"PDF process nahi ho payi: {e}")
+
+        if not image_paths:
+            raise ValueError("PDF se ek bhi page extract nahi hui!")
+
+        logger.info(f"PDF se {len(image_paths)} pages nikale (200dpi, q92)")
         return image_paths
 
     # ─────────────────────────────────────────

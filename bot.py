@@ -313,20 +313,29 @@ async def process_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     try:
         # Step 1: Get images (from PDF, ZIP, or direct uploads)
+        # NOTE: pdf_to_images/zip_to_images CPU-bound blocking calls hain
+        # (cv2, pdf2image) — run_in_executor mein chalate hain taaki bot ka
+        # event loop block na ho aur Telegram ko response milte rahe
+        # (warna bot "stuck" dikhta hai aur Railway timeout/restart kar deta hai)
+        loop = asyncio.get_event_loop()
         if pdf_path:
             await status_msg.edit_text(
                 "🎬 *Video ban rahi hai...*\n\n"
                 "⏳ Step 1/4: PDF se images nikal raha hoon...",
                 parse_mode='Markdown'
             )
-            image_paths = processor.pdf_to_images(pdf_path)
+            image_paths = await loop.run_in_executor(
+                None, processor.pdf_to_images, pdf_path
+            )
         elif zip_path:
             await status_msg.edit_text(
                 "🎬 *Video ban rahi hai...*\n\n"
                 "⏳ Step 1/4: ZIP se images nikal raha hoon...",
                 parse_mode='Markdown'
             )
-            image_paths = processor.zip_to_images(zip_path)
+            image_paths = await loop.run_in_executor(
+                None, processor.zip_to_images, zip_path
+            )
 
         # Step 2: Remove text from panels (settings ke hisaab se — optional)
         if settings.get('text_removal'):
@@ -336,7 +345,9 @@ async def process_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 "⏳ Step 2/4: Manga text hat raha hai...",
                 parse_mode='Markdown'
             )
-            cleaned_images = processor.remove_text_from_images(image_paths)
+            cleaned_images = await loop.run_in_executor(
+                None, processor.remove_text_from_images, image_paths
+            )
         else:
             cleaned_images = list(image_paths)
 
