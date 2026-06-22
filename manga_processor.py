@@ -138,7 +138,11 @@ class MangaProcessor:
     #   - "position": 0-100 (panel ke kis vertical %% par yeh beat focus
     #     karta hai — 0 = top, 100 = bottom)
     def _make_fallback_beats(self) -> list:
-        return [{"text": "Is panel mein scene aage badhta hai.", "position": 50}]
+        return [
+            {"text": "Is panel mein scene shuru hota hai.", "position": 15},
+            {"text": "Kahani yahan aage badh rahi hai.", "position": 55},
+            {"text": "Yeh panel yahan khatam hota hai.", "position": 90},
+        ]
 
     async def generate_panel_script(self, image_path: str) -> list:
         try:
@@ -152,7 +156,13 @@ class MangaProcessor:
             "Tu ek professional Hindi manga/comic EXPLAINER hai — jaise koi "
             "YouTuber manga explain karta hai, story ko engaging banake.\n\n"
             "Is panel (ek manga/comic page) ko dhyaan se dekh:\n"
-            "- Speech bubbles, captions, sound-effects ka text padh\n"
+            "- Speech bubbles, captions, sound-effects ka text padh — "
+            "IMPORTANT: yeh text KISI BHI language mein ho sakta hai "
+            "(English, Italian, Japanese, Korean, Spanish, ya koi aur "
+            "bhasha) — jo bhi language ho, uska meaning samajh aur Hindi/ "
+            "Hinglish mein convert kar. Kabhi bhi 'samajh nahi aaya' ya "
+            "generic placeholder mat de — agar text chhota/unclear lage "
+            "to bhi best-effort translate kar uska matlab nikaal ke\n"
             "- Characters ki facial expression, body language, background, "
             "scene ka mood bhi observe kar\n"
             "- Yeh sab milake ek natural Hindi/Hinglish explainer narration "
@@ -161,7 +171,10 @@ class MangaProcessor:
             "aur kehti hai - Strange, meri mummy ne iske bare mein kabhi nahi "
             "bola tha')\n"
             "- Dialogue ka exact meaning mat badalna, bas use natural "
-            "explainer flow mein pirona hai\n\n"
+            "explainer flow mein pirona hai\n"
+            "- Agar panel mein bilkul koi text/bubble nahi hai (sirf pure "
+            "art/scene hai), tabhi sirf scene-description de — warna hamesha "
+            "panel ke andar jo likha hai usi se shuru kar\n\n"
             "Panel ko TOP se BOTTOM tak alag-alag 'beats' mein todo — har "
             "beat ek chhota narration-chunk hai jo panel ke ek specific "
             "vertical hisse (top/middle/bottom ya in between) se related hai. "
@@ -185,8 +198,29 @@ class MangaProcessor:
                 logger.info(f"Gemini panel-script call attempt {attempt}/3")
                 loop = asyncio.get_event_loop()
                 response = await loop.run_in_executor(
-                    None, lambda: self.model.generate_content(content_parts)
+                    None, lambda: self.model.generate_content(
+                        content_parts,
+                        safety_settings={
+                            'HARM_CATEGORY_HARASSMENT': 'BLOCK_NONE',
+                            'HARM_CATEGORY_HATE_SPEECH': 'BLOCK_NONE',
+                            'HARM_CATEGORY_SEXUALLY_EXPLICIT': 'BLOCK_NONE',
+                            'HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_NONE',
+                        }
+                    )
                 )
+
+                # Safety-block ya empty response check
+                if not response.candidates:
+                    raise ValueError("Gemini ne koi candidate nahi diya (shayad safety block)")
+                candidate = response.candidates[0]
+                finish_reason = getattr(candidate, 'finish_reason', None)
+                finish_str = str(finish_reason) if finish_reason is not None else ""
+                # finish_reason==1 ya 'STOP' matlab normal completion. Kuch
+                # bhi aur (SAFETY=3, RECITATION=4, MAX_TOKENS=2, etc.) means
+                # response truncated/blocked tha.
+                if finish_str and not any(s in finish_str.upper() for s in ('STOP', '1')):
+                    raise ValueError(f"Gemini finish_reason: {finish_str} (safety/length block ho sakta hai)")
+
                 text = response.text.strip()
 
                 if '```json' in text:
@@ -220,7 +254,7 @@ class MangaProcessor:
 
             except Exception as e:
                 err_str = str(e)
-                logger.error(f"Gemini error (attempt {attempt}): {err_str[:200]}")
+                logger.error(f"Gemini error (attempt {attempt}/3) for {os.path.basename(image_path)}: {err_str[:300]}")
 
                 is_rate_limit = ('429' in err_str or
                                  'quota' in err_str.lower() or
