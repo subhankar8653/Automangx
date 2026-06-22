@@ -417,9 +417,23 @@ async def process_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE,
         )
 
         async def _video_progress(done: int, total: int):
-            # Har panel pe edit nahi karte (Telegram rate-limit lag sakti
-            # hai) — sirf har 2 panels ya last panel par update karte hain,
-            # jaisa Step 3 mein bhi karte hain
+            # done == -1 is a special signal: all panels rendered,
+            # final ffmpeg merge/BGM mix chal rahi hai
+            if done == -1:
+                try:
+                    await status_msg.edit_text(
+                        "🎬 *Video ban rahi hai...*\n\n"
+                        "✅ Step 1/4: Images ready!\n"
+                        "✅ Step 2/4: Panel text settings apply ho gayi!\n"
+                        "✅ Step 3/4: Explainer-script taiyar!\n"
+                        f"✅ Step 4/4: Panels render ho gaye ({total}/{total})!\n"
+                        "⏳ Step 5/5: Final video merge + BGM mix ho rahi hai...",
+                        parse_mode='Markdown'
+                    )
+                except Exception:
+                    pass
+                return
+            # Har 2 panels ya last panel par update karo
             if done % 2 == 0 or done == total:
                 try:
                     await status_msg.edit_text(

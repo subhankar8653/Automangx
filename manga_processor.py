@@ -721,11 +721,15 @@ class MangaProcessor:
             if self.AUDIO_SPEED and self.AUDIO_SPEED != 1.0:
                 sped_path = output_path + '.sped.mp3'
                 try:
-                    raw_clip = AudioFileClip(output_path)
-                    fast_clip = raw_clip.fx(afx.audio_speedx, self.AUDIO_SPEED)
-                    fast_clip.write_audiofile(sped_path, logger=None)
-                    raw_clip.close()
-                    fast_clip.close()
+                    from pydub import AudioSegment
+                    sound = AudioSegment.from_mp3(output_path)
+                    # frame_rate badhaao = faster playback, no moviepy dependency
+                    new_rate = int(sound.frame_rate * self.AUDIO_SPEED)
+                    fast_sound = sound._spawn(
+                        sound.raw_data,
+                        overrides={"frame_rate": new_rate}
+                    ).set_frame_rate(sound.frame_rate)
+                    fast_sound.export(sped_path, format="mp3")
                     os.replace(sped_path, output_path)
                 except Exception as e:
                     logger.warning(f"Audio speed-up fail ({e}) — normal-speed audio use kar raha hoon")
@@ -1025,90 +1029,116 @@ class MangaProcessor:
         if not part_paths:
             raise ValueError("Koi panel clip nahi bani!")
 
-        # ── Step 2: Chhoti mp4 parts ko disk-backed clips ki tarah reload karo ──
-        # VideoFileClip disk se stream karta hai, poora numpy array RAM mein
-        # nahi rakhta — isliye 8 parts ko bhi ek saath khol ke rakhna safe hai
-        final_video = None
-        bgm_clip = None
+        # ── Step 2: ffmpeg se zero-RAM concat ──
+        # moviepy concatenate_videoclips + write_videofile saari part clips
+        # RAM mein reload karta hai — 8 panels * ~60MB = ~480MB+ peak RAM,
+        # jo Railway free plan pe OOM-kill + container restart karta hai.
+        # Iske bajaye ffmpeg concat demuxer use karo: ek text file mein
+        # saari part paths likhte hain, ffmpeg unhe stream-copy se
+        # (no re-encode, zero RAM) ek file mein jod deta hai.
+        # BGM bhi ffmpeg se hi mix karte hain — alag amix filter se.
         output_path = None
-        part_clips = []
 
         try:
-            for p in part_paths:
-                part_clips.append(VideoFileClip(p))
-
-            final_video = concatenate_videoclips(part_clips, method="compose")
-
-            # Quality scale (height ke hisaab se, aspect ratio 16:9 maintain)
-            if quality_height and quality_height != CANVAS_H:
-                final_video = final_video.resize(height=quality_height)
-
-            # ── BGM mix karo agar enabled hai aur file exist karti hai ──
-            if bgm_enabled and os.path.exists(DEFAULT_BGM_PATH) and final_video.audio:
-                try:
-                    bgm_clip = AudioFileClip(DEFAULT_BGM_PATH)
-                    volume_factor = max(0, min(100, bgm_volume)) / 100.0
-
-                    if bgm_clip.duration < final_video.duration:
-                        bgm_clip = bgm_clip.fx(afx.audio_loop,
-                                               duration=final_video.duration)
-                    else:
-                        bgm_clip = bgm_clip.subclip(0, final_video.duration)
-
-                    bgm_clip = bgm_clip.volumex(volume_factor)
-                    composite_audio = CompositeAudioClip([final_video.audio, bgm_clip])
-                    final_video = final_video.set_audio(composite_audio)
-                except Exception as e:
-                    logger.warning(f"BGM mix nahi ho payi: {e} — bina BGM ke chalu")
-            elif bgm_enabled:
-                logger.warning(f"BGM file nahi mili ({DEFAULT_BGM_PATH}) — skip kar raha hoon")
-
             out_tmp = tempfile.NamedTemporaryFile(
                 suffix='_manga_video.mp4', delete=False)
             output_path = out_tmp.name
             out_tmp.close()
             self.temp_files.append(output_path)
 
-            temp_audio = os.path.join(
-                tempfile.gettempdir(),
-                f'manga_audio_tmp_{os.getpid()}.m4a')
-            self.temp_files.append(temp_audio)
+            # Concat list file banao
+            concat_list_f = tempfile.NamedTemporaryFile(
+                mode='w', suffix='_concat.txt', delete=False)
+            concat_list_path = concat_list_f.name
+            self.temp_files.append(concat_list_path)
+            for p in part_paths:
+                concat_list_f.write(f"file '{p}'\n")
+            concat_list_f.close()
 
-            await loop.run_in_executor(
-                None,
-                lambda: final_video.write_videofile(
-                    output_path,
-                    fps=24,
-                    codec='libx264',
-                    audio_codec='aac',
-                    temp_audiofile=temp_audio,
-                    remove_temp=True,
-                    threads=2,
-                    preset='ultrafast',
-                    verbose=False,
-                    logger=None,
-                )
-            )
+            # Quality scale: agar quality_height 720 se alag ho to scale karo
+            vf_filter = ""
+            if quality_height and quality_height != CANVAS_H:
+                aspect = CANVAS_W / CANVAS_H
+                new_w = int(quality_height * aspect)
+                new_w = new_w if new_w % 2 == 0 else new_w + 1
+                vf_filter = f"scale={new_w}:{quality_height}"
 
-            logger.info(f"Video ban gayi: {output_path}")
+            has_bgm = bgm_enabled and os.path.exists(DEFAULT_BGM_PATH)
+
+            def _ffmpeg_merge():
+                import subprocess
+
+                if has_bgm:
+                    # Step A: concat parts → temp merged (no BGM yet)
+                    merged_tmp = tempfile.NamedTemporaryFile(
+                        suffix='_merged_nobgm.mp4', delete=False)
+                    merged_path = merged_tmp.name
+                    merged_tmp.close()
+                    self.temp_files.append(merged_path)
+
+                    cmd_concat = [
+                        'ffmpeg', '-y', '-f', 'concat', '-safe', '0',
+                        '-i', concat_list_path,
+                        '-c', 'copy',
+                        merged_path
+                    ]
+                    subprocess.run(cmd_concat, check=True,
+                                   capture_output=True)
+                    logger.info("Parts concat ho gayi (no BGM)")
+
+                    # Step B: BGM mix — amix filter
+                    vol = max(0, min(100, bgm_volume)) / 100.0
+                    audio_filter = (
+                        f"[0:a]aformat=fltp,volume=1.0[main];"
+                        f"[1:a]aformat=fltp,volume={vol:.2f},aloop=0:size=2e+09:start=0[bgm];"
+                        f"[main][bgm]amix=inputs=2:duration=first:dropout_transition=2[aout]"
+                    )
+                    cmd_parts = [
+                        'ffmpeg', '-y',
+                        '-i', merged_path,
+                        '-stream_loop', '-1', '-i', DEFAULT_BGM_PATH,
+                    ]
+                    if vf_filter:
+                        cmd_parts += ['-vf', vf_filter]
+                    cmd_parts += [
+                        '-filter_complex', audio_filter,
+                        '-map', '0:v', '-map', '[aout]',
+                        '-c:v', 'libx264', '-preset', 'ultrafast',
+                        '-c:a', 'aac', '-shortest',
+                        output_path
+                    ]
+                    subprocess.run(cmd_parts, check=True, capture_output=True)
+                    logger.info("BGM mix ho gayi")
+
+                else:
+                    # No BGM — direct concat + optional scale
+                    cmd = [
+                        'ffmpeg', '-y', '-f', 'concat', '-safe', '0',
+                        '-i', concat_list_path,
+                    ]
+                    if vf_filter:
+                        cmd += ['-vf', vf_filter,
+                                '-c:v', 'libx264', '-preset', 'ultrafast',
+                                '-c:a', 'aac']
+                    else:
+                        cmd += ['-c', 'copy']
+                    cmd.append(output_path)
+                    subprocess.run(cmd, check=True, capture_output=True)
+
+                logger.info(f"Video ban gayi: {output_path}")
+
+            if progress_callback:
+                # Final merge shuru ho rahi hai — ek aur status update bhejo
+                try:
+                    await progress_callback(-1, len(image_paths))
+                except Exception:
+                    pass
+
+            await loop.run_in_executor(None, _ffmpeg_merge)
+            logger.info(f"Video ready: {output_path}")
             return output_path
 
         finally:
-            if bgm_clip:
-                try:
-                    bgm_clip.close()
-                except Exception:
-                    pass
-            if final_video:
-                try:
-                    final_video.close()
-                except Exception:
-                    pass
-            for clip in part_clips:
-                try:
-                    clip.close()
-                except Exception:
-                    pass
             gc.collect()
 
     # ─────────────────────────────────────────
