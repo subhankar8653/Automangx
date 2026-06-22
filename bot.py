@@ -1,12 +1,19 @@
 import os
 import asyncio
 import logging
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
+    filters, ContextTypes
+)
 from pathlib import Path
 import tempfile
 
 from manga_processor import MangaProcessor
+from db import (
+    get_user_settings, update_user_setting, reset_user_settings,
+    QUALITY_OPTIONS, VOICE_OPTIONS, DEFAULT_SETTINGS
+)
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -18,16 +25,23 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "YOUR_BOT_TOKEN_HERE")
 
 processor = MangaProcessor()
 
+
+# ═════════════════════════════════════════
+# Basic commands
+# ═════════════════════════════════════════
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🎌 *Manga Hindi Explainer Bot mein swagat hai!*\n\n"
         "Mujhe bhejo:\n"
         "📸 Manga images (JPG/PNG) — ek ek karke ya saath mein\n"
-        "📄 PDF file — poora chapter\n\n"
+        "📄 PDF file — poora chapter\n"
+        "🗂️ ZIP file — pura folder bhi chalega\n\n"
         "Main:\n"
         "✅ Text hataunga panels se\n"
         "✅ Hindi mein story explain karunga\n"
         "✅ Voice ke saath video bana ke dunga!\n\n"
+        "⚙️ /settings se quality, voice, BGM, blur control karo\n\n"
         "Chalo shuru karte hain! 🔥",
         parse_mode='Markdown'
     )
@@ -35,29 +49,198 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📖 *Kaise use karein:*\n\n"
-        "1. Manga ke images bhejo (JPG/PNG)\n"
-        "2. Ya PDF bhejo\n"
-        "3. /process command do jab saare images bhej do\n"
-        "4. Wait karo — video ban raha hoga!\n\n"
+        "1. Manga ke images, PDF ya ZIP bhejo\n"
+        "2. /process command do jab ready ho\n"
+        "3. Wait karo — video ban raha hoga!\n\n"
+        "⚙️ /settings — Quality, Voice, BGM, Blur change karo\n\n"
         "⚠️ Note: Video banane mein 2-5 minute lag sakte hain.",
         parse_mode='Markdown'
     )
 
-async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+# ═════════════════════════════════════════
+# Settings menu
+# ═════════════════════════════════════════
+
+def build_settings_text(s: dict) -> str:
+    bgm_status = f"ON ({s['bgm_volume']}%)" if s['bgm_enabled'] else "OFF"
+    blur_status = f"{s['blur']}%" if s['blur'] > 0 else "OFF"
+    voice_label = VOICE_OPTIONS.get(s['voice'], {}).get('label', s['voice'])
+    return (
+        "⚙️ *YOUR CURRENT SETTINGS* ⚙️\n\n"
+        f"🎥 Quality: `{s['quality']}`\n"
+        f"🗣️ Voice: `{voice_label}`\n"
+        f"🎵 BGM: `{bgm_status}`\n"
+        f"🌫️ Blur: `{blur_status}`\n\n"
+        "👇 Select option to change:"
+    )
+
+def build_settings_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎥 Quality", callback_data="menu_quality"),
+         InlineKeyboardButton("🗣️ Voice", callback_data="menu_voice")],
+        [InlineKeyboardButton("🎵 BGM", callback_data="menu_bgm"),
+         InlineKeyboardButton("🌫️ Blur", callback_data="menu_blur")],
+        [InlineKeyboardButton("🔄 Reset to Default", callback_data="reset_settings")],
+    ])
+
+async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    
+    s = await get_user_settings(user_id)
+    await update.message.reply_text(
+        build_settings_text(s),
+        parse_mode='Markdown',
+        reply_markup=build_settings_keyboard()
+    )
+
+async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    data = query.data
+    await query.answer()
+
+    # ── Back to main settings menu ──
+    if data == "back_settings":
+        s = await get_user_settings(user_id)
+        await query.edit_message_text(
+            build_settings_text(s), parse_mode='Markdown',
+            reply_markup=build_settings_keyboard()
+        )
+        return
+
+    # ── Reset ──
+    if data == "reset_settings":
+        await reset_user_settings(user_id)
+        s = await get_user_settings(user_id)
+        await query.edit_message_text(
+            "✅ Settings reset ho gayi default pe!\n\n" + build_settings_text(s),
+            parse_mode='Markdown',
+            reply_markup=build_settings_keyboard()
+        )
+        return
+
+    # ── Quality submenu ──
+    if data == "menu_quality":
+        buttons = [[InlineKeyboardButton(q, callback_data=f"set_quality_{q}")]
+                   for q in QUALITY_OPTIONS.keys()]
+        buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="back_settings")])
+        await query.edit_message_text(
+            "🎥 *Quality select karo:*", parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+        return
+
+    if data.startswith("set_quality_"):
+        quality = data.replace("set_quality_", "")
+        await update_user_setting(user_id, "quality", quality)
+        s = await get_user_settings(user_id)
+        await query.edit_message_text(
+            f"✅ Quality set: `{quality}`\n\n" + build_settings_text(s),
+            parse_mode='Markdown',
+            reply_markup=build_settings_keyboard()
+        )
+        return
+
+    # ── Voice submenu ──
+    if data == "menu_voice":
+        buttons = [[InlineKeyboardButton(v['label'], callback_data=f"set_voice_{key}")]
+                   for key, v in VOICE_OPTIONS.items()]
+        buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="back_settings")])
+        await query.edit_message_text(
+            "🗣️ *Voice select karo:*\n\n"
+            "_Note: ek hi TTS engine hai, ye sirf style/tone variant hai,_\n"
+            "_real alag gender ki awaaz nahi._",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+        return
+
+    if data.startswith("set_voice_"):
+        voice = data.replace("set_voice_", "")
+        await update_user_setting(user_id, "voice", voice)
+        s = await get_user_settings(user_id)
+        await query.edit_message_text(
+            f"✅ Voice set: `{VOICE_OPTIONS[voice]['label']}`\n\n" + build_settings_text(s),
+            parse_mode='Markdown',
+            reply_markup=build_settings_keyboard()
+        )
+        return
+
+    # ── BGM submenu ──
+    if data == "menu_bgm":
+        buttons = [
+            [InlineKeyboardButton("🔇 OFF", callback_data="set_bgm_off")],
+            [InlineKeyboardButton("🔈 20%", callback_data="set_bgm_20"),
+             InlineKeyboardButton("🔉 40%", callback_data="set_bgm_40")],
+            [InlineKeyboardButton("🔊 60%", callback_data="set_bgm_60"),
+             InlineKeyboardButton("📢 80%", callback_data="set_bgm_80")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="back_settings")],
+        ]
+        await query.edit_message_text(
+            "🎵 *BGM volume select karo:*", parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+        return
+
+    if data.startswith("set_bgm_"):
+        val = data.replace("set_bgm_", "")
+        if val == "off":
+            await update_user_setting(user_id, "bgm_enabled", False)
+        else:
+            await update_user_setting(user_id, "bgm_enabled", True)
+            await update_user_setting(user_id, "bgm_volume", int(val))
+        s = await get_user_settings(user_id)
+        await query.edit_message_text(
+            "✅ BGM updated!\n\n" + build_settings_text(s),
+            parse_mode='Markdown',
+            reply_markup=build_settings_keyboard()
+        )
+        return
+
+    # ── Blur submenu ──
+    if data == "menu_blur":
+        buttons = [
+            [InlineKeyboardButton("🔲 OFF", callback_data="set_blur_0")],
+            [InlineKeyboardButton("Low (25%)", callback_data="set_blur_25"),
+             InlineKeyboardButton("Medium (50%)", callback_data="set_blur_50")],
+            [InlineKeyboardButton("High (75%)", callback_data="set_blur_75")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="back_settings")],
+        ]
+        await query.edit_message_text(
+            "🌫️ *Blur strength select karo:*\n"
+            "_(short-video style blurred background ke piche image fit hoti hai)_",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+        return
+
+    if data.startswith("set_blur_"):
+        val = int(data.replace("set_blur_", ""))
+        await update_user_setting(user_id, "blur", val)
+        s = await get_user_settings(user_id)
+        await query.edit_message_text(
+            "✅ Blur updated!\n\n" + build_settings_text(s),
+            parse_mode='Markdown',
+            reply_markup=build_settings_keyboard()
+        )
+        return
+
+
+# ═════════════════════════════════════════
+# File handlers (image / pdf / zip)
+# ═════════════════════════════════════════
+
+async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if 'images' not in context.user_data:
         context.user_data['images'] = []
-    
-    # Get highest quality photo
+
     photo = update.message.photo[-1]
     file = await context.bot.get_file(photo.file_id)
-    
-    # Save to temp
+
     with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
         await file.download_to_drive(tmp.name)
         context.user_data['images'].append(tmp.name)
-    
+
     count = len(context.user_data['images'])
     await update.message.reply_text(
         f"✅ Image {count} mil gayi!\n"
@@ -66,123 +249,174 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
-    
-    if doc.mime_type == 'application/pdf':
+    fname = (doc.file_name or "").lower()
+
+    if doc.mime_type == 'application/pdf' or fname.endswith('.pdf'):
         await update.message.reply_text("📄 PDF mil gayi! Process ho rahi hai... thoda wait karo ⏳")
-        
         file = await context.bot.get_file(doc.file_id)
         with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp:
             await file.download_to_drive(tmp.name)
             pdf_path = tmp.name
-        
         await process_and_send(update, context, pdf_path=pdf_path)
-    
-    elif doc.mime_type in ['image/jpeg', 'image/png']:
+
+    elif fname.endswith('.zip') or doc.mime_type in (
+            'application/zip', 'application/x-zip-compressed'):
+        await update.message.reply_text("🗂️ ZIP mil gayi! Extract karke process ho rahi hai... thoda wait karo ⏳")
         file = await context.bot.get_file(doc.file_id)
-        suffix = '.jpg' if doc.mime_type == 'image/jpeg' else '.png'
+        with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as tmp:
+            await file.download_to_drive(tmp.name)
+            zip_path = tmp.name
+        await process_and_send(update, context, zip_path=zip_path)
+
+    elif doc.mime_type in ('image/jpeg', 'image/png') or fname.endswith(('.jpg', '.jpeg', '.png')):
+        file = await context.bot.get_file(doc.file_id)
+        suffix = '.png' if fname.endswith('.png') else '.jpg'
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
             await file.download_to_drive(tmp.name)
             if 'images' not in context.user_data:
                 context.user_data['images'] = []
             context.user_data['images'].append(tmp.name)
-        
+
         count = len(context.user_data['images'])
         await update.message.reply_text(
             f"✅ Image {count} mil gayi!\n"
             f"Aur images bhejo ya /process likho 🎬"
         )
     else:
-        await update.message.reply_text("⚠️ Sirf JPG, PNG ya PDF bhejo yaar!")
+        await update.message.reply_text("⚠️ Sirf JPG, PNG, PDF ya ZIP bhejo yaar!")
 
 async def process_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     images = context.user_data.get('images', [])
-    
+
     if not images:
-        await update.message.reply_text("⚠️ Pehle kuch images bhejo bhai!")
+        await update.message.reply_text("⚠️ Pehle kuch images, PDF ya ZIP bhejo bhai!")
         return
-    
+
     await process_and_send(update, context, image_paths=images)
     context.user_data['images'] = []
 
-async def process_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE, 
-                            image_paths=None, pdf_path=None):
+
+# ═════════════════════════════════════════
+# Core processing pipeline
+# ═════════════════════════════════════════
+
+async def process_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                            image_paths=None, pdf_path=None, zip_path=None):
+    user_id = update.effective_user.id
+    settings = await get_user_settings(user_id)
+
     status_msg = await update.message.reply_text(
         "🎬 *Video ban rahi hai...*\n\n"
-        "⏳ Step 1/4: Images process ho rahi hain...",
+        "⏳ Step 1/5: Images process ho rahi hain...",
         parse_mode='Markdown'
     )
-    
+
     try:
-        # Step 1: Extract images from PDF if needed
+        # Step 1: Get images (from PDF, ZIP, or direct uploads)
         if pdf_path:
             await status_msg.edit_text(
                 "🎬 *Video ban rahi hai...*\n\n"
-                "⏳ Step 1/4: PDF se images nikal raha hoon...",
+                "⏳ Step 1/5: PDF se images nikal raha hoon...",
                 parse_mode='Markdown'
             )
             image_paths = processor.pdf_to_images(pdf_path)
-        
+        elif zip_path:
+            await status_msg.edit_text(
+                "🎬 *Video ban rahi hai...*\n\n"
+                "⏳ Step 1/5: ZIP se images nikal raha hoon...",
+                parse_mode='Markdown'
+            )
+            image_paths = processor.zip_to_images(zip_path)
+
         # Step 2: Remove text from panels
         await status_msg.edit_text(
             "🎬 *Video ban rahi hai...*\n\n"
-            "✅ Step 1/4: Images ready!\n"
-            "⏳ Step 2/4: Manga text hat raha hai...",
+            "✅ Step 1/5: Images ready!\n"
+            "⏳ Step 2/5: Manga text hat raha hai...",
             parse_mode='Markdown'
         )
         cleaned_images = processor.remove_text_from_images(image_paths)
-        
-        # Step 3: Generate Hindi explanation
+
+        # Step 3: Apply blur background (settings ke hisaab se)
         await status_msg.edit_text(
             "🎬 *Video ban rahi hai...*\n\n"
-            "✅ Step 1/4: Images ready!\n"
-            "✅ Step 2/4: Text hat gaya!\n"
-            "⏳ Step 3/4: Hindi story likh raha hoon...",
+            "✅ Step 1/5: Images ready!\n"
+            "✅ Step 2/5: Text hat gaya!\n"
+            "⏳ Step 3/5: Background effect laga raha hoon...",
+            parse_mode='Markdown'
+        )
+        styled_images = processor.apply_blur_background(cleaned_images, settings['blur'])
+
+        # Step 4: Generate Hindi explanation
+        await status_msg.edit_text(
+            "🎬 *Video ban rahi hai...*\n\n"
+            "✅ Step 1/5: Images ready!\n"
+            "✅ Step 2/5: Text hat gaya!\n"
+            "✅ Step 3/5: Background effect lag gaya!\n"
+            "⏳ Step 4/5: Hindi story likh raha hoon...",
             parse_mode='Markdown'
         )
         hindi_script = await processor.generate_hindi_script(image_paths)
-        
-        # Step 4: Generate video with voice
+
+        # Step 5: Generate video with voice + BGM
         await status_msg.edit_text(
             "🎬 *Video ban rahi hai...*\n\n"
-            "✅ Step 1/4: Images ready!\n"
-            "✅ Step 2/4: Text hat gaya!\n"
-            "✅ Step 3/4: Script taiyar!\n"
-            "⏳ Step 4/4: Voice aur video sync ho raha hai...",
+            "✅ Step 1/5: Images ready!\n"
+            "✅ Step 2/5: Text hat gaya!\n"
+            "✅ Step 3/5: Background effect lag gaya!\n"
+            "✅ Step 4/5: Script taiyar!\n"
+            "⏳ Step 5/5: Voice, BGM aur video sync ho raha hai...",
             parse_mode='Markdown'
         )
-        video_path = await processor.create_video_with_voice(cleaned_images, hindi_script)
-        
+
+        quality_height = QUALITY_OPTIONS.get(settings['quality'], 720)
+        video_path = await processor.create_video_with_voice(
+            styled_images, hindi_script,
+            quality_height=quality_height,
+            voice=settings['voice'],
+            bgm_enabled=settings['bgm_enabled'],
+            bgm_volume=settings['bgm_volume'],
+        )
+
         # Send video
         await status_msg.edit_text("✅ *Video taiyar hai! Bhej raha hoon...* 🎉", parse_mode='Markdown')
-        
+
         with open(video_path, 'rb') as video_file:
             await update.message.reply_video(
                 video=video_file,
-                caption="🎌 *Tumhari Manga Video!*\n\nKaisi lagi? Aur bhejo! 🔥",
+                caption="🎌 *Tumhari Manga Video!*\n\nKaisi lagi? Aur bhejo! 🔥\n\n⚙️ /settings se style change karo",
                 parse_mode='Markdown',
                 supports_streaming=True
             )
-        
+
         await status_msg.delete()
-        
+
         # Cleanup
-        processor.cleanup(image_paths, cleaned_images, video_path, pdf_path)
-        
+        processor.cleanup(image_paths, cleaned_images, styled_images,
+                           video_path, pdf_path, zip_path)
+
     except Exception as e:
         logger.error(f"Error: {e}")
         await status_msg.edit_text(
             f"❌ Kuch gadbad ho gayi yaar!\nError: {str(e)}\n\nDobara try karo!"
         )
 
+
+# ═════════════════════════════════════════
+# Main
+# ═════════════════════════════════════════
+
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-    
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("process", process_command))
+    app.add_handler(CommandHandler("settings", settings_command))
+    app.add_handler(CallbackQueryHandler(settings_callback))
     app.add_handler(MessageHandler(filters.PHOTO, handle_image))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-    
+
     logger.info("Bot chal raha hai! 🚀")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 

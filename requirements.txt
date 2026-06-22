@@ -6,3 +6,5 @@ opencv-python-headless==4.9.0.80
 Pillow==10.2.0
 pdf2image==1.17.0
 numpy==1.26.4
+motor==3.4.0
+pymongo==4.6.3

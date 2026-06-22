@@ -1,6 +1,7 @@
 import os
 import re
 import cv2
+import zipfile
 import numpy as np
 import asyncio
 import tempfile
@@ -11,13 +12,20 @@ from pathlib import Path
 from PIL import Image
 import google.generativeai as genai
 from gtts import gTTS
-from moviepy.editor import ImageClip, AudioFileClip, concatenate_videoclips
+from moviepy.editor import ImageClip, AudioFileClip, concatenate_videoclips, CompositeAudioClip, afx
 from pdf2image import convert_from_path
 
 logger = logging.getLogger(__name__)
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_GEMINI_KEY_HERE")
 genai.configure(api_key=GEMINI_API_KEY)
+
+# Default BGM track — isi folder mein assets/default_bgm.mp3 rakhna hai
+DEFAULT_BGM_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "assets", "default_bgm.mp3"
+)
+
+IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.webp', '.bmp')
 
 
 class MangaProcessor:
@@ -38,6 +46,44 @@ class MangaProcessor:
             image_paths.append(tmp.name)
             self.temp_files.append(tmp.name)
         logger.info(f"PDF se {len(image_paths)} pages nikale")
+        return image_paths
+
+    # ─────────────────────────────────────────
+    # 1b. ZIP → Images
+    # ─────────────────────────────────────────
+    def zip_to_images(self, zip_path: str) -> list:
+        image_paths = []
+        extract_dir = tempfile.mkdtemp(prefix='manga_zip_')
+        self.temp_files.append(extract_dir)
+
+        try:
+            with zipfile.ZipFile(zip_path, 'r') as zf:
+                zf.extractall(extract_dir)
+        except zipfile.BadZipFile:
+            raise ValueError("ZIP file corrupt hai ya invalid hai!")
+
+        # Naturally sorted file list (1, 2, 10 — not 1, 10, 2)
+        all_files = []
+        for root, _, files in os.walk(extract_dir):
+            for fname in files:
+                if fname.lower().endswith(IMAGE_EXTENSIONS):
+                    all_files.append(os.path.join(root, fname))
+
+        def natural_key(path):
+            name = os.path.basename(path)
+            return [int(t) if t.isdigit() else t.lower()
+                    for t in re.split(r'(\d+)', name)]
+
+        all_files.sort(key=natural_key)
+
+        if not all_files:
+            raise ValueError("ZIP ke andar koi image nahi mili!")
+
+        for f in all_files:
+            image_paths.append(f)
+            self.temp_files.append(f)
+
+        logger.info(f"ZIP se {len(image_paths)} images nikali")
         return image_paths
 
     # ─────────────────────────────────────────
@@ -78,8 +124,60 @@ class MangaProcessor:
         return cleaned_paths
 
     # ─────────────────────────────────────────
-    # 3. Gemini Hindi Script  (retry + fallback)
+    # 2b. Blur Effect (16:9 short-video style background)
     # ─────────────────────────────────────────
+    def apply_blur_background(self, image_paths: list, blur_strength: int) -> list:
+        """
+        blur_strength: 0-100. 0 = no effect, original lautata hai.
+        Image ko 16:9 blurred-background canvas ke beech mein fit karta hai —
+        jaise short-video / reels style panels dikhte hain.
+        """
+        if not blur_strength or blur_strength <= 0:
+            return image_paths
+
+        result_paths = []
+        # 0-100 ko kernel size mein convert (odd number chahiye OpenCV ko)
+        k = int(15 + (blur_strength / 100) * 70)
+        if k % 2 == 0:
+            k += 1
+
+        for img_path in image_paths:
+            try:
+                img = cv2.imread(img_path)
+                if img is None:
+                    result_paths.append(img_path)
+                    continue
+
+                h, w = img.shape[:2]
+                canvas_w, canvas_h = 1280, 720
+
+                # Background: image ko canvas size tak stretch karke blur karo
+                bg = cv2.resize(img, (canvas_w, canvas_h))
+                bg = cv2.GaussianBlur(bg, (k, k), 0)
+                # Thoda darken taaki foreground clearly dikhe
+                bg = cv2.convertScaleAbs(bg, alpha=0.6, beta=0)
+
+                # Foreground: original aspect ratio maintain karke center mein fit
+                scale = min(canvas_w / w, canvas_h / h)
+                new_w, new_h = int(w * scale), int(h * scale)
+                fg = cv2.resize(img, (new_w, new_h))
+
+                x_off = (canvas_w - new_w) // 2
+                y_off = (canvas_h - new_h) // 2
+                bg[y_off:y_off + new_h, x_off:x_off + new_w] = fg
+
+                tmp = tempfile.NamedTemporaryFile(suffix='_blur.jpg', delete=False)
+                cv2.imwrite(tmp.name, bg, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                result_paths.append(tmp.name)
+                self.temp_files.append(tmp.name)
+            except Exception as e:
+                logger.warning(f"Blur error ({img_path}): {e} — original use kar raha hoon")
+                result_paths.append(img_path)
+
+        logger.info(f"{len(result_paths)} images pe blur background lagaya (strength={blur_strength})")
+        return result_paths
+
+
     async def generate_hindi_script(self, image_paths: list) -> list:
 
         def make_fallback(paths):
@@ -192,16 +290,29 @@ class MangaProcessor:
     # ─────────────────────────────────────────
     # 4. gTTS Audio
     # ─────────────────────────────────────────
-    async def text_to_speech(self, text: str, output_path: str):
+    # NOTE: gTTS sirf ek hi Hindi voice deta hai — true male/female switch
+    # iske paas nahi hai. "voice" setting yahan sirf tld (accent/tone) badalti
+    # hai — halka sa style difference, na ki alag gender wali awaaz.
+    VOICE_TLD_MAP = {
+        "hi-female": "co.in",
+        "hi-male": "com",
+    }
+
+    async def text_to_speech(self, text: str, output_path: str, voice: str = "hi-female"):
+        tld = self.VOICE_TLD_MAP.get(voice, "co.in")
         loop = asyncio.get_event_loop()
         def _gen():
-            gTTS(text=text, lang='hi', slow=False).save(output_path)
+            gTTS(text=text, lang='hi', tld=tld, slow=False).save(output_path)
         await loop.run_in_executor(None, _gen)
 
     # ─────────────────────────────────────────
     # 5. Video banao  (Railway-safe MoviePy)
     # ─────────────────────────────────────────
-    async def create_video_with_voice(self, image_paths: list, script: list) -> str:
+    async def create_video_with_voice(self, image_paths: list, script: list,
+                                       quality_height: int = 720,
+                                       voice: str = "hi-female",
+                                       bgm_enabled: bool = True,
+                                       bgm_volume: int = 30) -> str:
 
         if not script:
             raise ValueError("Script empty hai!")
@@ -228,7 +339,7 @@ class MangaProcessor:
                 audio_path = audio_tmp.name
                 audio_tmp.close()
                 self.temp_files.append(audio_path)
-                await self.text_to_speech(hindi_text, audio_path)
+                await self.text_to_speech(hindi_text, audio_path, voice=voice)
 
                 if not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
                     raise ValueError("Audio file empty/missing")
@@ -244,7 +355,7 @@ class MangaProcessor:
                 # moviepy needs the file handle open until write_videofile.
                 # Will be closed in finally block after video is written.
 
-                img_clip = img_clip.resize(height=720)  # 720p — faster on Railway
+                img_clip = img_clip.resize(height=quality_height)
                 clips.append((img_clip, audio_clip))
 
             except Exception as e:
@@ -267,10 +378,33 @@ class MangaProcessor:
         audio_clips = [c[1] for c in clips]
 
         final_video = None
+        bgm_clip = None
+        composite_audio = None
         output_path = None
 
         try:
             final_video = concatenate_videoclips(video_clips, method="compose")
+
+            # ── BGM mix karo agar enabled hai aur file exist karti hai ──
+            if bgm_enabled and os.path.exists(DEFAULT_BGM_PATH):
+                try:
+                    bgm_clip = AudioFileClip(DEFAULT_BGM_PATH)
+                    volume_factor = max(0, min(100, bgm_volume)) / 100.0
+
+                    # BGM ko video duration tak loop karo
+                    if bgm_clip.duration < final_video.duration:
+                        bgm_clip = bgm_clip.fx(afx.audio_loop,
+                                               duration=final_video.duration)
+                    else:
+                        bgm_clip = bgm_clip.subclip(0, final_video.duration)
+
+                    bgm_clip = bgm_clip.volumex(volume_factor)
+                    composite_audio = CompositeAudioClip([final_video.audio, bgm_clip])
+                    final_video = final_video.set_audio(composite_audio)
+                except Exception as e:
+                    logger.warning(f"BGM mix nahi ho payi: {e} — bina BGM ke chalu")
+            elif bgm_enabled:
+                logger.warning(f"BGM file nahi mili ({DEFAULT_BGM_PATH}) — skip kar raha hoon")
 
             out_tmp = tempfile.NamedTemporaryFile(
                 suffix='_manga_video.mp4', delete=False)
@@ -306,6 +440,11 @@ class MangaProcessor:
 
         finally:
             # Close everything AFTER write is done
+            if bgm_clip:
+                try:
+                    bgm_clip.close()
+                except Exception:
+                    pass
             if final_video:
                 try:
                     final_video.close()
@@ -326,6 +465,7 @@ class MangaProcessor:
     # 6. Cleanup
     # ─────────────────────────────────────────
     def cleanup(self, *file_lists):
+        import shutil
         all_files = list(self.temp_files)
         for file_list in file_lists:
             if not file_list:
@@ -336,7 +476,9 @@ class MangaProcessor:
                 all_files.extend(file_list)
         for f in all_files:
             try:
-                if f and os.path.exists(f):
+                if f and os.path.isdir(f):
+                    shutil.rmtree(f, ignore_errors=True)
+                elif f and os.path.exists(f):
                     os.remove(f)
             except Exception:
                 pass
