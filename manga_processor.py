@@ -14,7 +14,7 @@ from google import genai
 from google.genai import types
 from gtts import gTTS
 from moviepy.editor import (
-    ImageClip, AudioFileClip, concatenate_videoclips, concatenate_audioclips,
+    ImageClip, AudioClip, AudioFileClip, concatenate_videoclips, concatenate_audioclips,
     CompositeAudioClip, CompositeVideoClip, VideoClip, afx
 )
 from pdf2image import convert_from_path
@@ -35,6 +35,10 @@ CANVAS_W, CANVAS_H = 1280, 720  # 16:9 video canvas
 
 
 class MangaProcessor:
+
+    BEAT_PAUSE = 0.35  # beats ke beech chhota silence gap — yeh value
+                        # timeline aur actual audio dono mein EXACT same
+                        # honi chahiye, warna scroll/audio drift ho jaata hai
 
     def __init__(self):
         # gemini-2.0-flash 1 June 2026 ko shutdown ho gaya tha — isliye
@@ -187,10 +191,14 @@ class MangaProcessor:
     #   - "position": 0-100 (panel ke kis vertical %% par yeh beat focus
     #     karta hai — 0 = top, 100 = bottom)
     def _make_fallback_beats(self) -> list:
+        # NOTE: Yeh tab use hota hai jab Gemini call 3 baar fail ho jaaye.
+        # Pehle isme 3 "beats" the jo normal content jaisa dikhte the —
+        # isse pata hi nahi chalta tha ki AI fail hua ya yeh actual script
+        # hai. Ab sirf EK clearly-fallback beat hai poore panel ke liye,
+        # taaki agar yeh dikhe to turant samajh aaye ki Gemini fail hua,
+        # aur logs check karne chahiye — fake/normal content jaisa nahi lagega.
         return [
-            {"text": "Is panel mein scene shuru hota hai.", "position": 15},
-            {"text": "Kahani yahan aage badh rahi hai.", "position": 55},
-            {"text": "Yeh panel yahan khatam hota hai.", "position": 90},
+            {"text": "Yeh panel abhi load nahi ho paya, aage badhte hain.", "position": 50},
         ]
 
     async def generate_panel_script(self, image_path: str, story_context: str = "") -> tuple:
@@ -216,18 +224,19 @@ class MangaProcessor:
         )
 
         prompt = (
-            "Tu ek POPULAR YouTube manga/comic EXPLAINER channel ka host hai "
-            "(jaise 'Anime Sasta', 'Manga Villain' jaise channels) — jo "
-            "story ko engaging, dramatic Hindi/Hinglish style mein sunata "
-            "hai, character names use karke, jaise koi kahani sunayi jaa "
-            "rahi ho.\n\n"
+            "Tu ek POPULAR YouTube manga/comic EXPLAINER hai — sochkar bol "
+            "jaise tu seedha camera ke saamne baithkar apne viewers ko REAL "
+            "MEIN yeh kahani sunna raha hai, jaise tune khud yeh panel "
+            "dekha hai aur ab excited ho ke bata raha hai. Yeh kisi "
+            "encyclopedia ya subtitle jaisa translation NAHI hai — yeh ek "
+            "INSAAN ki awaaz honi chahiye jo kahani mein invested hai.\n\n"
             + context_block +
             "Ab is NAYE panel ko dhyaan se dekh aur kahani aage badhao:\n\n"
             "RULES:\n"
             "1. Speech bubbles/captions/sound-effects ka text padh — yeh "
             "KISI BHI language mein ho sakta hai (English, Italian, "
             "Japanese, Korean, etc.) — uska meaning samajh aur Hindi/"
-            "Hinglish explainer-style mein convert kar. Kabhi 'samajh nahi "
+            "Hinglish mein apne natural words mein bata. Kabhi 'samajh nahi "
             "aaya' mat bol, best-effort translate kar.\n"
             "2. Character ka NAAM pata chal jaaye (text se ya pichle context "
             "se) to naam se refer kar ('Nancy ne kaha', 'Vampire boy ne "
@@ -237,12 +246,29 @@ class MangaProcessor:
             "expression, body language, scene ka mood, background bhi "
             "dekh aur natural storytelling mein pirona ('Nancy darr ke "
             "peeche dekhti hai aur kehti hai - ...').\n"
-            "4. YouTube-explainer ka energy rakh — thoda suspense/drama "
-            "build kar jahan scene mein tension ho, lekin dialogue ka exact "
-            "meaning mat badalna.\n"
-            "5. Agar panel mein bilkul koi text/bubble nahi hai (sirf art "
-            "hai), to scene ko dramatically describe kar — generic 'scene "
-            "aage badhta hai' jaisi khaali line KABHI mat de.\n\n"
+            "4. EK REAL NARRATOR ki tarah bol, copy-paste explainer ki "
+            "tarah nahi:\n"
+            "   - Kabhi-kabhi viewer se seedha baat kar ('Dekho yahan kya "
+            "hota hai', 'Ab yahan twist aata hai bhai')\n"
+            "   - Apni khud ki reaction daal jab scene shocking/funny/sad "
+            "ho ('Yeh dekh ke toh maza aa gaya', 'Arre yaar yeh toh "
+            "heartbreaking hai')\n"
+            "   - Rhetorical sawaal pooch jab suspense ho ('Ab yeh kya "
+            "karega?', 'Kya yeh sach mein possible hai?')\n"
+            "   - Panel-to-panel ek flowing kahani lage, har panel ek "
+            "ALAG generic intro/outro line se shuru/khatam mat kar — seedha "
+            "kahani mein dive kar jaise pichla panel abhi khatam hua ho\n"
+            "   - Natural Hindi filler/emphasis use kar jahan organic lage "
+            "('toh phir', 'lekin yaar', 'ekdum se') — lekin overdo mat kar\n"
+            "5. KABHI bhi generic filler lines mat de jaise 'is panel mein "
+            "scene shuru hota hai', 'kahani yahan aage badhti hai', 'yeh "
+            "panel yahan khatam hota hai' — yeh khaali placeholder lagti "
+            "hain, ek real narrator yeh kabhi nahi bolega. Har beat mein "
+            "ACTUAL content hona chahiye — dialogue, action, ya emotion.\n"
+            "6. Agar panel mein bilkul koi text/bubble nahi hai (sirf art "
+            "hai), to scene ko apne style mein dramatically describe kar — "
+            "kya ho raha hai, characters kaise feel kar rahe hain, kya "
+            "tension build ho raha hai — generic line KABHI mat de.\n\n"
             "Panel ko TOP se BOTTOM tak 'beats' mein todo — har beat ek "
             "chhota narration-chunk hai jo panel ke specific vertical hisse "
             "se related hai. 2 bubbles (upar-niche) hain to kam se kam 2 "
@@ -418,7 +444,7 @@ class MangaProcessor:
                 if not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
                     raise ValueError("Audio empty")
                 clip = AudioFileClip(audio_path)
-                dur = clip.duration + 0.35  # chhota pause beats ke beech
+                dur = clip.duration + self.BEAT_PAUSE  # chhota pause beats ke beech
                 clip.close()
             except Exception as e:
                 logger.warning(f"Beat {i} TTS error: {e} — 1.5s silence fallback")
@@ -444,16 +470,26 @@ class MangaProcessor:
             t_cursor += dur
 
         # ── Step 3: Concatenate saare beat-audios ek single audio mein ──
+        # IMPORTANT: timeline (Step 2) har beat ke baad self.BEAT_PAUSE
+        # ka silence gap maan ke chalti hai. Agar yahan audio mein woh
+        # gap nahi daala jaaye, to actual audio chhota reh jaata hai aur
+        # visual scroll se aage-peeche drift ho jaata hai (jitne zyada
+        # beats, utna zyada drift) — isi wajah se "jo bola jaa raha hai
+        # uske hisab se screen pe scene nahi dikhta" wala bug aata tha.
         audio_clip = None
         try:
             valid_audio_clips = []
-            for p in beat_audio_paths:
+            for idx, p in enumerate(beat_audio_paths):
                 if os.path.exists(p) and os.path.getsize(p) > 0:
                     valid_audio_clips.append(AudioFileClip(p))
+                # Har beat (last ko chhodke) ke baad timeline jaisa hi
+                # silence gap daalo, taaki audio aur scroll exactly sync rahein
+                if idx < len(beat_audio_paths) - 1:
+                    silence = AudioClip(
+                        lambda t: 0, duration=self.BEAT_PAUSE, fps=44100
+                    )
+                    valid_audio_clips.append(silence)
             if valid_audio_clips:
-                # Beats ke beech chhota silence gap (0.35s) — concatenate
-                # se simple rakhte hain, gap ko hum duration mein add kar
-                # chuke hain audio ke baad). Seedha concatenate karte hain.
                 audio_clip = concatenate_audioclips(valid_audio_clips)
             else:
                 audio_clip = None
