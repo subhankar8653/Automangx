@@ -54,6 +54,45 @@ def _get_genai_client(key_idx: int = None):
 
 genai_client = _get_genai_client(0)   # backward-compat (batch path ke liye)
 
+# ── Mistral Pixtral fallback — Railway mein MISTRAL_API_KEY set karo ──
+MISTRAL_API_KEY = os.environ.get("MISTRAL_API_KEY", "").strip()
+
+async def _call_pixtral(image_path: str, prompt: str) -> str:
+    """Mistral Pixtral-12B ko image + prompt bhejo, raw text response lo."""
+    import base64
+    import httpx
+
+    try:
+        with open(image_path, "rb") as f:
+            img_b64 = base64.b64encode(f.read()).decode()
+    except Exception as e:
+        raise ValueError(f"Pixtral image read error: {e}")
+
+    payload = {
+        "model": "pixtral-12b-2409",
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
+                {"type": "text", "text": prompt},
+            ]
+        }],
+        "max_tokens": 1024,
+    }
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.post(
+            "https://api.mistral.ai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {MISTRAL_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"]
+
+
 # Default BGM track — isi folder mein assets/default_bgm.mp3 rakhna hai
 DEFAULT_BGM_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "assets", "default_bgm.mp3"
@@ -516,6 +555,38 @@ class MangaProcessor:
                     await asyncio.sleep(wait_time)
                 else:
                     break   # non-retryable error
+
+        # ── Pixtral fallback — Gemini saari keys fail ho gayi ──
+        if MISTRAL_API_KEY:
+            logger.info("Gemini failed — Mistral Pixtral pe try kar raha hoon...")
+            try:
+                pixtral_response = await _call_pixtral(image_path, prompt)
+                # JSON parse karo same tarah jaise Gemini response
+                text = pixtral_response.strip()
+                if "```json" in text:
+                    text = text.split("```json")[1].split("```")[0].strip()
+                elif "```" in text:
+                    text = text.split("```")[1].split("```")[0].strip()
+                parsed = json.loads(text)
+                beats_data = parsed.get("beats", [])
+                new_context = (parsed.get("updated_context") or "").strip()
+                beats = []
+                for item in beats_data:
+                    txt = (item.get("text") or "").strip()
+                    if not txt:
+                        continue
+                    pos = item.get("position", 50)
+                    try:
+                        pos = max(0, min(100, float(pos)))
+                    except (TypeError, ValueError):
+                        pos = 50
+                    beats.append({"text": txt, "position": pos})
+                if beats:
+                    beats.sort(key=lambda b: b["position"])
+                    logger.info(f"Pixtral se {len(beats)} beats mile!")
+                    return beats, new_context or story_context
+            except Exception as pe:
+                logger.error(f"Pixtral bhi fail hua: {pe}")
 
         logger.info("Fallback beats use kar raha hoon is panel ke liye")
         return self._make_fallback_beats(), story_context
