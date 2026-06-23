@@ -70,11 +70,9 @@ class MangaProcessor:
                         # timeline aur actual audio dono mein EXACT same
                         # honi chahiye, warna scroll/audio drift ho jaata hai
 
-    # gemini-2.5-flash free-tier sirf 10 RPM (requests/minute) deta hai —
-    # matlab 2 calls ke beech kam se kam 6 second ka gap chahiye. Multiple
-    # keys hain to har KEY ka apna last-call time track karte hain aur
-    # jo key sabse zyada "rest" kar chuki ho use prefer karte hain.
-    MIN_GEMINI_GAP = 6.5  # seconds per key
+    # gemini-1.5-flash free-tier 15 RPM deta hai — 2.5-flash se zyada stable
+    # aur 503/quota errors bahut kam. Gap 4s kaafi hai ab.
+    MIN_GEMINI_GAP = 4.0  # seconds per key
 
     AUDIO_SPEED = 1.5  # voice playback speed multiplier — TTS audio
                         # generate hone ke turant baad isi speed se
@@ -85,7 +83,7 @@ class MangaProcessor:
                         # speed-adjustment ki zaroorat nahi padti
 
     def __init__(self):
-        self.model_name = 'gemini-2.5-flash'
+        self.model_name = 'gemini-1.5-flash'
         self.temp_files = []
         # Per-key last-call timestamp — index matches GEMINI_API_KEYS list
         self._key_last_call = [0.0] * len(GEMINI_API_KEYS)
