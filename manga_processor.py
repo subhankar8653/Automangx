@@ -18,9 +18,6 @@ from moviepy.editor import (
     ImageClip, AudioClip, AudioFileClip, concatenate_videoclips, concatenate_audioclips,
     CompositeAudioClip, CompositeVideoClip, VideoClip, VideoFileClip, afx
 )
-# moviepy 1.0.3 mein AudioArrayClip "moviepy.editor" se export nahi hoti,
-# iska actual module yahi hai — isliye alag se import kar rahe hain.
-from moviepy.audio.AudioClip import AudioArrayClip
 from pdf2image import convert_from_path
 
 logger = logging.getLogger(__name__)
@@ -334,23 +331,14 @@ class MangaProcessor:
         )
 
         prompt = (
-            "Tu ek POPULAR YouTube manga/comic EXPLAINER hai — bilkul ek "
-            "modern, current-gen banda jo apne viewers ko seedha camera ke "
-            "saamne baithkar kahani sunna raha hai, jaise tune khud yeh "
-            "panel dekha hai aur ab bata raha hai. Yeh kisi encyclopedia ya "
-            "subtitle jaisa translation NAHI hai — ek INSAAN ki awaaz honi "
-            "chahiye jo kahani mein invested hai, lekin TO-THE-POINT bole, "
-            "ghuma-phira ke nahi.\n\n"
+            "Tu ek POPULAR YouTube manga/comic EXPLAINER hai — sochkar bol "
+            "jaise tu seedha camera ke saamne baithkar apne viewers ko REAL "
+            "MEIN yeh kahani sunna raha hai, jaise tune khud yeh panel "
+            "dekha hai aur ab excited ho ke bata raha hai. Yeh kisi "
+            "encyclopedia ya subtitle jaisa translation NAHI hai — yeh ek "
+            "INSAAN ki awaaz honi chahiye jo kahani mein invested hai.\n\n"
             + context_block +
             "Ab is NAYE panel ko dhyaan se dekh aur kahani aage badhao:\n\n"
-            "SABSE BADA RULE — SIRF ZAROORI BAAT, KUCH EXTRA NAHI:\n"
-            "Jo is panel mein hua usse explain kar, sirf utna jitna samajhne "
-            "ke liye chahiye. Detail mein mat ja — extra scene-painting, "
-            "lambi mood-description, dohri reaction ya dohra rhetorical "
-            "sawaal mat daal. Ek baat ek baar bol, dusri baar mat ghuma. "
-            "Agar koi line bina bole bhi kahani samajh aa rahi hai (sirf "
-            "atmosphere/flavor ke liye hai), woh line HATA de. Chhota aur "
-            "sharp rakhna hamesha lamba aur detailed se better hai.\n\n"
             "RULES:\n"
             "1. Speech bubbles/captions/sound-effects ka text padh — yeh "
             "KISI BHI language mein ho sakta hai (English, Italian, "
@@ -358,38 +346,45 @@ class MangaProcessor:
             "Hinglish mein apne natural words mein bata. Kabhi 'samajh nahi "
             "aaya' mat bol, best-effort translate kar.\n"
             "2. Character ka NAAM pata chal jaaye (text se ya pichle context "
-            "se) to naam se refer kar ('Nancy ne kaha') — generic 'ladki' ya "
-            "'ladka' avoid kar jab tak naam na pata ho.\n"
-            "3. Dialogue ke saath zaroorat ho tabhi expression/action mention "
-            "kar ('Nancy darr ke kehti hai - ...') — lekin sirf EK chhota "
-            "tag, pura paragraph scene describe karne mein mat lagao.\n"
-            "4. Tone MODERN aur CASUAL ho, jaisa aaj koi young banda baat "
-            "karta hai — purani filmy ya bohot formal Hindi NAHI, normal "
-            "Hinglish jo real life mein log bolte hain:\n"
+            "se) to naam se refer kar ('Nancy ne kaha', 'Vampire boy ne "
+            "muskura ke jawab diya') — generic 'ladki' ya 'ladka' avoid kar "
+            "jab tak naam na pata ho.\n"
+            "3. Sirf dialogue translate mat kar — characters ki facial "
+            "expression, body language, scene ka mood, background bhi "
+            "dekh aur natural storytelling mein pirona ('Nancy darr ke "
+            "peeche dekhti hai aur kehti hai - ...').\n"
+            "4. EK REAL NARRATOR ki tarah bol, copy-paste explainer ki "
+            "tarah nahi:\n"
             "   - Kabhi-kabhi viewer se seedha baat kar ('Dekho yahan kya "
-            "hota hai', 'Ab twist aata hai bhai') — lekin yeh sirf occasional "
-            "ho, har beat mein nahi\n"
-            "   - Apni reaction daal sakta hai par EK chhoti phrase mein "
-            "('toh ekdum se', 'yeh toh mast tha') — uske liye alag sentence "
-            "mat banao\n"
-            "   - Natural casual words use kar ('bhai', 'yaar', 'toh phir', "
-            "'ekdum se') lekin overdo mat kar, ek hi beat mein 2 filler mat "
-            "thoko\n"
-            "   - Panel-to-panel flow lage, alag generic intro/outro se "
-            "shuru/khatam mat kar — seedha kahani mein dive kar\n"
+            "hota hai', 'Ab yahan twist aata hai bhai')\n"
+            "   - Apni khud ki reaction daal jab scene shocking/funny/sad "
+            "ho ('Yeh dekh ke toh maza aa gaya', 'Arre yaar yeh toh "
+            "heartbreaking hai')\n"
+            "   - Rhetorical sawaal pooch jab suspense ho ('Ab yeh kya "
+            "karega?', 'Kya yeh sach mein possible hai?')\n"
+            "   - Panel-to-panel ek flowing kahani lage, har panel ek "
+            "ALAG generic intro/outro line se shuru/khatam mat kar — seedha "
+            "kahani mein dive kar jaise pichla panel abhi khatam hua ho\n"
+            "   - Natural Hindi filler/emphasis use kar jahan organic lage "
+            "('toh phir', 'lekin yaar', 'ekdum se') — lekin overdo mat kar\n"
             "5. KABHI bhi generic filler lines mat de jaise 'is panel mein "
-            "scene shuru hota hai', 'kahani yahan aage badhti hai' — yeh "
-            "khaali placeholder hain. Har beat mein ACTUAL content hona "
-            "chahiye — dialogue, action, ya emotion, extra padding nahi.\n"
+            "scene shuru hota hai', 'kahani yahan aage badhti hai', 'yeh "
+            "panel yahan khatam hota hai' — yeh khaali placeholder lagti "
+            "hain, ek real narrator yeh kabhi nahi bolega. Har beat mein "
+            "ACTUAL content hona chahiye — dialogue, action, ya emotion.\n"
             "6. Agar panel mein bilkul koi text/bubble nahi hai (sirf art "
-            "hai), to scene ko EK chhoti line mein bata de ki kya ho raha "
-            "hai ya kaisa feel ho raha hai — generic line mat de, par lamba "
-            "description bhi mat bana, seedha point pe aa.\n"
-            "7. LENGTH — yeh sabse zaroori hai: har beat STRICTLY EK chhota "
-            "sentence ho (zaroorat pade tabhi 2 bohot chhote sentences, "
-            "kabhi 3 nahi). Jo bhi extra hai usse kaat de. Repeat ya "
-            "already-bola-hua context dobara mat bata. Jab doubt ho ki "
-            "extra line daalein ya nahi, mat daalo — chhota rakho.\n\n"
+            "hai), to scene ko apne style mein dramatically describe kar — "
+            "kya ho raha hai, characters kaise feel kar rahe hain, kya "
+            "tension build ho raha hai — generic line KABHI mat de.\n"
+            "7. CONCISE rakh — personality aur energy ke naam par lambi "
+            "lines mat bana. Episode already kaafi lamba ho jaata hai "
+            "agar har beat 2-3 sentence ka ho jaaye. Jo bhi reaction/"
+            "rhetorical-sawaal/filler daal rahe ho (rule 4), use EK CHHOTI "
+            "phrase mein fit kar do — pura alag sentence mat bana usi ke "
+            "liye. Har beat ideally EK hi sentence mein poora ho (zaroorat "
+            "pade tabhi 2 chhote sentences), aur sirf woh information jo "
+            "is exact panel-portion ke liye zaroori hai — repeat ya "
+            "already-bola-hua context dobara mat bata.\n\n"
             "Panel ko TOP se BOTTOM tak 'beats' mein todo — har beat ek "
             "chhota narration-chunk hai jo panel ke specific vertical hisse "
             "se related hai. 2 bubbles (upar-niche) hain to kam se kam 2 "
@@ -419,12 +414,7 @@ class MangaProcessor:
         # Total attempts = min(3, number_of_keys * 2) — taaki multiple keys
         # ke saath zyada chances milein bina infinite loop ke
         max_attempts = min(3 * len(GEMINI_API_KEYS), max(3, len(GEMINI_API_KEYS) * 2))
-        # +len(keys) extra attempts taaki ek RPM-cooldown round ke baad bhi
-        # poora ek round retry karne ka chance mile (warna cooldown ka fayda
-        # nahi milta kyunki attempts already khatam ho jaate)
-        max_attempts += len(GEMINI_API_KEYS)
         last_429_key = None   # 429 dene wali key ko next attempt mein avoid karo
-        rate_limit_streak = 0  # consecutive 429s is round mein — sab keys cycle hue ya nahi, track karne ke liye
 
         for attempt in range(1, max_attempts + 1):
             # Best key choose karo — jo sabse zyada rest kar chuki ho
@@ -511,26 +501,10 @@ class MangaProcessor:
 
                 if is_rate_limit:
                     last_429_key = key_idx  # next attempt mein yeh key avoid karo
-                    rate_limit_streak += 1
                     if len(GEMINI_API_KEYS) > 1:
-                        # Agar abhi tak saari keys ek hi round mein 429 nahi de chuki,
-                        # turant doosri key try karo (chhota buffer).
-                        # Agar pure round (saari keys) fail ho gaya, iska matlab
-                        # RPM (per-minute) limit trip hui hai, keys "khatam" nahi
-                        # hui — proper cooldown karo, fallback pe jaane se pehle.
-                        if rate_limit_streak < len(GEMINI_API_KEYS):
-                            logger.info(f"Key {key_idx+1} rate-limited — dusri key pe switch kar raha hoon...")
-                            await asyncio.sleep(1)
-                        else:
-                            wait_time = 22
-                            m = re.search(r'seconds:\s*(\d+)', err_str)
-                            if m:
-                                wait_time = int(m.group(1)) + 5
-                            logger.info(f"Saari {len(GEMINI_API_KEYS)} keys ek round mein rate-limited — "
-                                        f"RPM cooldown {wait_time}s, fallback se pehle retry...")
-                            await asyncio.sleep(wait_time)
-                            rate_limit_streak = 0
-                            last_429_key = None
+                        # Doosri key available hai — turant switch, no 65s wait
+                        logger.info(f"Key {key_idx+1} rate-limited — dusri key pe switch kar raha hoon...")
+                        await asyncio.sleep(1)   # tiny buffer only
                     else:
                         # Sirf 1 key hai — purana 65s wait fallback
                         wait_time = 65
@@ -625,9 +599,7 @@ class MangaProcessor:
         )
 
         max_attempts = min(3 * len(GEMINI_API_KEYS), max(3, len(GEMINI_API_KEYS) * 2))
-        max_attempts += len(GEMINI_API_KEYS)  # ek RPM-cooldown round ke baad retry ka chance
         last_429_key = None
-        rate_limit_streak = 0
         ctx = story_context
 
         for attempt in range(1, max_attempts + 1):
@@ -706,21 +678,9 @@ class MangaProcessor:
 
                 if is_rate_limit:
                     last_429_key = key_idx
-                    rate_limit_streak += 1
                     if len(GEMINI_API_KEYS) > 1:
-                        if rate_limit_streak < len(GEMINI_API_KEYS):
-                            logger.info(f"Batch key {key_idx+1} rate-limited — switch kar raha hoon...")
-                            await asyncio.sleep(1)
-                        else:
-                            wait_time = 22
-                            m = re.search(r'seconds:\s*(\d+)', err_str)
-                            if m:
-                                wait_time = int(m.group(1)) + 5
-                            logger.info(f"Batch: saari {len(GEMINI_API_KEYS)} keys ek round mein "
-                                        f"rate-limited — RPM cooldown {wait_time}s...")
-                            await asyncio.sleep(wait_time)
-                            rate_limit_streak = 0
-                            last_429_key = None
+                        logger.info(f"Batch key {key_idx+1} rate-limited — switch kar raha hoon...")
+                        await asyncio.sleep(1)
                     else:
                         wait_time = 65
                         m = re.search(r'seconds:\s*(\d+)', err_str)
