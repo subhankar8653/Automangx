@@ -360,78 +360,44 @@ class MangaProcessor:
             logger.warning(f"Image read error ({image_path}): {e}")
             return self._make_fallback_beats(), story_context
 
+        # Cover page detection — pehla panel aur koi story context nahi = cover hai
+        is_cover = not story_context.strip()
+
         context_block = (
-            f"📖 AB TAK KI KAHANI (pichle panels se):\n{story_context}\n\n"
+            f"\U0001f4d6 AB TAK KI KAHANI (pichle panels se):\n{story_context}\n\n"
             if story_context.strip() else
-            "📖 Yeh PEHLA panel hai is comic ka — koi pichla context nahi hai.\n\n"
+            "\U0001f4d6 Yeh PEHLA panel / COVER IMAGE hai.\n\n"
         )
 
-        prompt = (
-            "Tu ek POPULAR YouTube manga/comic EXPLAINER hai — sochkar bol "
-            "jaise tu seedha camera ke saamne baithkar apne viewers ko REAL "
-            "MEIN yeh kahani sunna raha hai, jaise tune khud yeh panel "
-            "dekha hai aur ab excited ho ke bata raha hai. Yeh kisi "
-            "encyclopedia ya subtitle jaisa translation NAHI hai — yeh ek "
-            "INSAAN ki awaaz honi chahiye jo kahani mein invested hai.\n\n"
-            + context_block +
-            "Ab is NAYE panel ko dhyaan se dekh aur kahani aage badhao:\n\n"
-            "RULES:\n"
-            "1. Speech bubbles/captions/sound-effects ka text padh — yeh "
-            "KISI BHI language mein ho sakta hai (English, Italian, "
-            "Japanese, Korean, etc.) — uska meaning samajh aur Hindi/"
-            "Hinglish mein apne natural words mein bata. Kabhi 'samajh nahi "
-            "aaya' mat bol, best-effort translate kar.\n"
-            "2. Character ka NAAM pata chal jaaye (text se ya pichle context "
-            "se) to naam se refer kar ('Nancy ne kaha', 'Vampire boy ne "
-            "muskura ke jawab diya') — generic 'ladki' ya 'ladka' avoid kar "
-            "jab tak naam na pata ho.\n"
-            "3. Sirf dialogue translate mat kar — characters ki facial "
-            "expression, body language, scene ka mood, background bhi "
-            "dekh aur natural storytelling mein pirona ('Nancy darr ke "
-            "peeche dekhti hai aur kehti hai - ...').\n"
-            "4. EK REAL NARRATOR ki tarah bol, copy-paste explainer ki "
-            "tarah nahi:\n"
-            "   - Kabhi-kabhi viewer se seedha baat kar ('Dekho yahan kya "
-            "hota hai', 'Ab yahan twist aata hai bhai')\n"
-            "   - Apni khud ki reaction daal jab scene shocking/funny/sad "
-            "ho ('Yeh dekh ke toh maza aa gaya', 'Arre yaar yeh toh "
-            "heartbreaking hai')\n"
-            "   - Rhetorical sawaal pooch jab suspense ho ('Ab yeh kya "
-            "karega?', 'Kya yeh sach mein possible hai?')\n"
-            "   - Panel-to-panel ek flowing kahani lage, har panel ek "
-            "ALAG generic intro/outro line se shuru/khatam mat kar — seedha "
-            "kahani mein dive kar jaise pichla panel abhi khatam hua ho\n"
-            "   - Natural Hindi filler/emphasis use kar jahan organic lage "
-            "('toh phir', 'lekin yaar', 'ekdum se') — lekin overdo mat kar\n"
-            "5. KABHI bhi generic filler lines mat de jaise 'is panel mein "
-            "scene shuru hota hai', 'kahani yahan aage badhti hai', 'yeh "
-            "panel yahan khatam hota hai' — yeh khaali placeholder lagti "
-            "hain, ek real narrator yeh kabhi nahi bolega. Har beat mein "
-            "ACTUAL content hona chahiye — dialogue, action, ya emotion.\n"
-            "6. Agar panel mein bilkul koi text/bubble nahi hai (sirf art "
-            "hai), to scene ko apne style mein dramatically describe kar — "
-            "kya ho raha hai, characters kaise feel kar rahe hain, kya "
-            "tension build ho raha hai — generic line KABHI mat de.\n"
-            "7. CONCISE rakh — personality aur energy ke naam par lambi "
-            "lines mat bana. Episode already kaafi lamba ho jaata hai "
-            "agar har beat 2-3 sentence ka ho jaaye. Jo bhi reaction/"
-            "rhetorical-sawaal/filler daal rahe ho (rule 4), use EK CHHOTI "
-            "phrase mein fit kar do — pura alag sentence mat bana usi ke "
-            "liye. Har beat ideally EK hi sentence mein poora ho (zaroorat "
-            "pade tabhi 2 chhote sentences), aur sirf woh information jo "
-            "is exact panel-portion ke liye zaroori hai — repeat ya "
-            "already-bola-hua context dobara mat bata.\n\n"
-            "Panel ko TOP se BOTTOM tak 'beats' mein todo — har beat ek "
-            "chhota narration-chunk hai jo panel ke specific vertical hisse "
-            "se related hai. 2 bubbles (upar-niche) hain to kam se kam 2 "
-            "beats banao.\n\n"
-            "Har beat ke liye 'position' do (0=top, 100=bottom panel mein).\n\n"
-            "Sirf JSON object return karo, kuch aur nahi, is exact format mein:\n"
-            '{"beats": [{"position": 10, "text": "..."}, {"position": 70, "text": "..."}], '
-            '"updated_context": "ek chhota (2-3 sentence) summary jo ab tak '
-            'ki kahani capture kare — character names, important events — '
-            'jo NEXT panel ke liye yaad rakhna zaroori hai"}'
-        )
+        if is_cover:
+            prompt = (
+                "Yeh ek manga ka COVER IMAGE hai — story panel nahi hai.\n"
+                "Sirf 1 chhoti punchy line mein cover introduce karo jaise ek "
+                "YouTube narrator karta hai — title/characters ka naam lo "
+                "(agar image mein dikh raha ho), ek line mein vibe bato, bas.\n"
+                "MAX 1 beat. 10 second se zyada content mat banao.\n\n"
+                'Sirf JSON return karo:\n'
+                '{"beats": [{"position": 50, "text": "...ek punchy intro line..."}], '
+                '"updated_context": "manga title aur main characters jo cover se pata chale"}'
+            )
+        else:
+            prompt = (
+                "Tu ek POPULAR YouTube manga/comic EXPLAINER hai — excited, natural, concise.\n\n"
+                + context_block +
+                "Is panel ko dekh aur kahani aage badhao:\n\n"
+                "RULES:\n"
+                "1. Speech bubbles/text kisi bhi language mein ho — Hindi/Hinglish mein naturally bata.\n"
+                "2. Character ka naam pata ho to naam lo, warna expression/action describe karo.\n"
+                "3. Sirf dialogue nahi — mood, expression, tension bhi capture karo.\n"
+                "4. Real narrator ki tarah bol — kabhi viewer se seedha baat karo, "
+                "kabhi reaction do, kabhi rhetorical sawaal — but CONCISE raho.\n"
+                "5. Generic filler KABHI nahi — har beat mein ACTUAL content hona chahiye.\n"
+                "6. Har beat MAX 1-2 chhote sentences. Total 2-4 beats max per panel.\n\n"
+                "Panel TOP se BOTTOM tak beats mein todo. Position 0=top, 100=bottom.\n\n"
+                'Sirf JSON return karo, kuch aur nahi:\n'
+                '{"beats": [{"position": 10, "text": "..."}, {"position": 70, "text": "..."}], '
+                '"updated_context": "2-3 sentence summary — characters, key events — next panel ke liye"}'
+            )
 
         content_parts = [
             types.Part.from_text(text=prompt),
