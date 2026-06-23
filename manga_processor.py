@@ -54,45 +54,6 @@ def _get_genai_client(key_idx: int = None):
 
 genai_client = _get_genai_client(0)   # backward-compat (batch path ke liye)
 
-# ── Mistral Pixtral fallback — Railway mein MISTRAL_API_KEY set karo ──
-MISTRAL_API_KEY = os.environ.get("MISTRAL_API_KEY", "").strip()
-
-async def _call_pixtral(image_path: str, prompt: str) -> str:
-    """Mistral Pixtral-12B ko image + prompt bhejo, raw text response lo."""
-    import base64
-    import httpx
-
-    try:
-        with open(image_path, "rb") as f:
-            img_b64 = base64.b64encode(f.read()).decode()
-    except Exception as e:
-        raise ValueError(f"Pixtral image read error: {e}")
-
-    payload = {
-        "model": "pixtral-12b-2409",
-        "messages": [{
-            "role": "user",
-            "content": [
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
-                {"type": "text", "text": prompt},
-            ]
-        }],
-        "max_tokens": 1024,
-    }
-
-    async with httpx.AsyncClient(timeout=60) as client:
-        r = await client.post(
-            "https://api.mistral.ai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {MISTRAL_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-        )
-        r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"]
-
-
 # Default BGM track — isi folder mein assets/default_bgm.mp3 rakhna hai
 DEFAULT_BGM_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "assets", "default_bgm.mp3"
@@ -109,8 +70,11 @@ class MangaProcessor:
                         # timeline aur actual audio dono mein EXACT same
                         # honi chahiye, warna scroll/audio drift ho jaata hai
 
-    # gemini-2.0-flash free-tier — v1beta mein supported, fast, stable.
-    MIN_GEMINI_GAP = 4.0  # seconds per key
+    # gemini-2.5-flash free-tier sirf 10 RPM (requests/minute) deta hai —
+    # matlab 2 calls ke beech kam se kam 6 second ka gap chahiye. Multiple
+    # keys hain to har KEY ka apna last-call time track karte hain aur
+    # jo key sabse zyada "rest" kar chuki ho use prefer karte hain.
+    MIN_GEMINI_GAP = 6.5  # seconds per key
 
     AUDIO_SPEED = 1.5  # voice playback speed multiplier — TTS audio
                         # generate hone ke turant baad isi speed se
@@ -121,7 +85,7 @@ class MangaProcessor:
                         # speed-adjustment ki zaroorat nahi padti
 
     def __init__(self):
-        self.model_name = 'gemini-2.0-flash'
+        self.model_name = 'gemini-2.5-flash'
         self.temp_files = []
         # Per-key last-call timestamp — index matches GEMINI_API_KEYS list
         self._key_last_call = [0.0] * len(GEMINI_API_KEYS)
@@ -360,44 +324,78 @@ class MangaProcessor:
             logger.warning(f"Image read error ({image_path}): {e}")
             return self._make_fallback_beats(), story_context
 
-        # Cover page detection — pehla panel aur koi story context nahi = cover hai
-        is_cover = not story_context.strip()
-
         context_block = (
-            f"\U0001f4d6 AB TAK KI KAHANI (pichle panels se):\n{story_context}\n\n"
+            f"📖 AB TAK KI KAHANI (pichle panels se):\n{story_context}\n\n"
             if story_context.strip() else
-            "\U0001f4d6 Yeh PEHLA panel / COVER IMAGE hai.\n\n"
+            "📖 Yeh PEHLA panel hai is comic ka — koi pichla context nahi hai.\n\n"
         )
 
-        if is_cover:
-            prompt = (
-                "Yeh ek manga ka COVER IMAGE hai — story panel nahi hai.\n"
-                "Sirf 1 chhoti punchy line mein cover introduce karo jaise ek "
-                "YouTube narrator karta hai — title/characters ka naam lo "
-                "(agar image mein dikh raha ho), ek line mein vibe bato, bas.\n"
-                "MAX 1 beat. 10 second se zyada content mat banao.\n\n"
-                'Sirf JSON return karo:\n'
-                '{"beats": [{"position": 50, "text": "...ek punchy intro line..."}], '
-                '"updated_context": "manga title aur main characters jo cover se pata chale"}'
-            )
-        else:
-            prompt = (
-                "Tu ek POPULAR YouTube manga/comic EXPLAINER hai — excited, natural, concise.\n\n"
-                + context_block +
-                "Is panel ko dekh aur kahani aage badhao:\n\n"
-                "RULES:\n"
-                "1. Speech bubbles/text kisi bhi language mein ho — Hindi/Hinglish mein naturally bata.\n"
-                "2. Character ka naam pata ho to naam lo, warna expression/action describe karo.\n"
-                "3. Sirf dialogue nahi — mood, expression, tension bhi capture karo.\n"
-                "4. Real narrator ki tarah bol — kabhi viewer se seedha baat karo, "
-                "kabhi reaction do, kabhi rhetorical sawaal — but CONCISE raho.\n"
-                "5. Generic filler KABHI nahi — har beat mein ACTUAL content hona chahiye.\n"
-                "6. Har beat MAX 1-2 chhote sentences. Total 2-4 beats max per panel.\n\n"
-                "Panel TOP se BOTTOM tak beats mein todo. Position 0=top, 100=bottom.\n\n"
-                'Sirf JSON return karo, kuch aur nahi:\n'
-                '{"beats": [{"position": 10, "text": "..."}, {"position": 70, "text": "..."}], '
-                '"updated_context": "2-3 sentence summary — characters, key events — next panel ke liye"}'
-            )
+        prompt = (
+            "Tu ek POPULAR YouTube manga/comic EXPLAINER hai — sochkar bol "
+            "jaise tu seedha camera ke saamne baithkar apne viewers ko REAL "
+            "MEIN yeh kahani sunna raha hai, jaise tune khud yeh panel "
+            "dekha hai aur ab excited ho ke bata raha hai. Yeh kisi "
+            "encyclopedia ya subtitle jaisa translation NAHI hai — yeh ek "
+            "INSAAN ki awaaz honi chahiye jo kahani mein invested hai.\n\n"
+            + context_block +
+            "Ab is NAYE panel ko dhyaan se dekh aur kahani aage badhao:\n\n"
+            "RULES:\n"
+            "1. Speech bubbles/captions/sound-effects ka text padh — yeh "
+            "KISI BHI language mein ho sakta hai (English, Italian, "
+            "Japanese, Korean, etc.) — uska meaning samajh aur Hindi/"
+            "Hinglish mein apne natural words mein bata. Kabhi 'samajh nahi "
+            "aaya' mat bol, best-effort translate kar.\n"
+            "2. Character ka NAAM pata chal jaaye (text se ya pichle context "
+            "se) to naam se refer kar ('Nancy ne kaha', 'Vampire boy ne "
+            "muskura ke jawab diya') — generic 'ladki' ya 'ladka' avoid kar "
+            "jab tak naam na pata ho.\n"
+            "3. Sirf dialogue translate mat kar — characters ki facial "
+            "expression, body language, scene ka mood, background bhi "
+            "dekh aur natural storytelling mein pirona ('Nancy darr ke "
+            "peeche dekhti hai aur kehti hai - ...').\n"
+            "4. EK REAL NARRATOR ki tarah bol, copy-paste explainer ki "
+            "tarah nahi:\n"
+            "   - Kabhi-kabhi viewer se seedha baat kar ('Dekho yahan kya "
+            "hota hai', 'Ab yahan twist aata hai bhai')\n"
+            "   - Apni khud ki reaction daal jab scene shocking/funny/sad "
+            "ho ('Yeh dekh ke toh maza aa gaya', 'Arre yaar yeh toh "
+            "heartbreaking hai')\n"
+            "   - Rhetorical sawaal pooch jab suspense ho ('Ab yeh kya "
+            "karega?', 'Kya yeh sach mein possible hai?')\n"
+            "   - Panel-to-panel ek flowing kahani lage, har panel ek "
+            "ALAG generic intro/outro line se shuru/khatam mat kar — seedha "
+            "kahani mein dive kar jaise pichla panel abhi khatam hua ho\n"
+            "   - Natural Hindi filler/emphasis use kar jahan organic lage "
+            "('toh phir', 'lekin yaar', 'ekdum se') — lekin overdo mat kar\n"
+            "5. KABHI bhi generic filler lines mat de jaise 'is panel mein "
+            "scene shuru hota hai', 'kahani yahan aage badhti hai', 'yeh "
+            "panel yahan khatam hota hai' — yeh khaali placeholder lagti "
+            "hain, ek real narrator yeh kabhi nahi bolega. Har beat mein "
+            "ACTUAL content hona chahiye — dialogue, action, ya emotion.\n"
+            "6. Agar panel mein bilkul koi text/bubble nahi hai (sirf art "
+            "hai), to scene ko apne style mein dramatically describe kar — "
+            "kya ho raha hai, characters kaise feel kar rahe hain, kya "
+            "tension build ho raha hai — generic line KABHI mat de.\n"
+            "7. CONCISE rakh — personality aur energy ke naam par lambi "
+            "lines mat bana. Episode already kaafi lamba ho jaata hai "
+            "agar har beat 2-3 sentence ka ho jaaye. Jo bhi reaction/"
+            "rhetorical-sawaal/filler daal rahe ho (rule 4), use EK CHHOTI "
+            "phrase mein fit kar do — pura alag sentence mat bana usi ke "
+            "liye. Har beat ideally EK hi sentence mein poora ho (zaroorat "
+            "pade tabhi 2 chhote sentences), aur sirf woh information jo "
+            "is exact panel-portion ke liye zaroori hai — repeat ya "
+            "already-bola-hua context dobara mat bata.\n\n"
+            "Panel ko TOP se BOTTOM tak 'beats' mein todo — har beat ek "
+            "chhota narration-chunk hai jo panel ke specific vertical hisse "
+            "se related hai. 2 bubbles (upar-niche) hain to kam se kam 2 "
+            "beats banao.\n\n"
+            "Har beat ke liye 'position' do (0=top, 100=bottom panel mein).\n\n"
+            "Sirf JSON object return karo, kuch aur nahi, is exact format mein:\n"
+            '{"beats": [{"position": 10, "text": "..."}, {"position": 70, "text": "..."}], '
+            '"updated_context": "ek chhota (2-3 sentence) summary jo ab tak '
+            'ki kahani capture kare — character names, important events — '
+            'jo NEXT panel ke liye yaad rakhna zaroori hai"}'
+        )
 
         content_parts = [
             types.Part.from_text(text=prompt),
@@ -521,38 +519,6 @@ class MangaProcessor:
                     await asyncio.sleep(wait_time)
                 else:
                     break   # non-retryable error
-
-        # ── Pixtral fallback — Gemini saari keys fail ho gayi ──
-        if MISTRAL_API_KEY:
-            logger.info("Gemini failed — Mistral Pixtral pe try kar raha hoon...")
-            try:
-                pixtral_response = await _call_pixtral(image_path, prompt)
-                # JSON parse karo same tarah jaise Gemini response
-                text = pixtral_response.strip()
-                if "```json" in text:
-                    text = text.split("```json")[1].split("```")[0].strip()
-                elif "```" in text:
-                    text = text.split("```")[1].split("```")[0].strip()
-                parsed = json.loads(text)
-                beats_data = parsed.get("beats", [])
-                new_context = (parsed.get("updated_context") or "").strip()
-                beats = []
-                for item in beats_data:
-                    txt = (item.get("text") or "").strip()
-                    if not txt:
-                        continue
-                    pos = item.get("position", 50)
-                    try:
-                        pos = max(0, min(100, float(pos)))
-                    except (TypeError, ValueError):
-                        pos = 50
-                    beats.append({"text": txt, "position": pos})
-                if beats:
-                    beats.sort(key=lambda b: b["position"])
-                    logger.info(f"Pixtral se {len(beats)} beats mile!")
-                    return beats, new_context or story_context
-            except Exception as pe:
-                logger.error(f"Pixtral bhi fail hua: {pe}")
 
         logger.info("Fallback beats use kar raha hoon is panel ke liye")
         return self._make_fallback_beats(), story_context
