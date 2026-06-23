@@ -70,8 +70,7 @@ class MangaProcessor:
                         # timeline aur actual audio dono mein EXACT same
                         # honi chahiye, warna scroll/audio drift ho jaata hai
 
-    # gemini-1.5-flash free-tier 15 RPM deta hai — 2.5-flash se zyada stable
-    # aur 503/quota errors bahut kam. Gap 4s kaafi hai ab.
+    # gemini-2.0-flash free-tier — v1beta mein supported, fast, stable.
     MIN_GEMINI_GAP = 4.0  # seconds per key
 
     AUDIO_SPEED = 1.5  # voice playback speed multiplier — TTS audio
@@ -83,7 +82,7 @@ class MangaProcessor:
                         # speed-adjustment ki zaroorat nahi padti
 
     def __init__(self):
-        self.model_name = 'gemini-1.5-flash'
+        self.model_name = 'gemini-2.0-flash'
         self.temp_files = []
         # Per-key last-call timestamp — index matches GEMINI_API_KEYS list
         self._key_last_call = [0.0] * len(GEMINI_API_KEYS)
