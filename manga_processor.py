@@ -686,14 +686,16 @@ class MangaProcessor:
         return panel_rgb, is_tall, scaled_h
 
     # ─────────────────────────────────────────
-    # 6. Panel clip with scroll + audio sync
+    # 6. Panel clip with beat-synced scroll + audio sync
+    # Beat durations se scroll speed dynamic — jahan dialog fast wahan scroll fast,
+    # jahan slow wahan slow. Video crop bug bhi fix — scroll_range_display consistent.
     # ─────────────────────────────────────────
     async def create_panel_clip(self, img_path: str, beats: list, voice: str = "hi-female"):
-        panel_rgb, is_tall, panel_h = self._load_scaled_panel(img_path)
-        scroll_range = max(0, panel_h - CANVAS_H)
 
+        # ── Step 1: Har beat ka audio generate karo, real duration measure karo ──
         beat_audio_paths = []
-        beat_durations = []
+        beat_durations = []  # actual measured durations (seconds, including BEAT_PAUSE)
+
         for i, beat in enumerate(beats):
             audio_tmp = tempfile.NamedTemporaryFile(suffix=f'_beat{i}.mp3', delete=False)
             audio_path = audio_tmp.name
@@ -715,15 +717,13 @@ class MangaProcessor:
             beat_audio_paths.append(audio_path)
             beat_durations.append(dur)
 
-        # Audio combine karo — actual_duration measure karna zaroori hai scroll speed ke liye
+        # ── Step 2: Audio combine + real durations measure (pydub se accurate ms) ──
         combined_audio_path = None
         audio_clip = None
+        real_durations = []   # pydub se exact measured durations
         actual_duration = sum(beat_durations)
         if actual_duration <= 0:
             actual_duration = 1.5
-
-        # Real measured durations for timeline (pydub se accurate ms)
-        real_durations = []
 
         try:
             from pydub import AudioSegment
@@ -759,11 +759,11 @@ class MangaProcessor:
                 logger.info(f"Audio: {actual_duration:.2f}s, {valid_count} beats")
             else:
                 logger.warning("Koi valid beat audio nahi")
-                real_durations = beat_durations
+                real_durations = list(beat_durations)
 
         except Exception as e:
             logger.warning(f"pydub error: {e} — moviepy fallback")
-            real_durations = beat_durations
+            real_durations = list(beat_durations)
             try:
                 valid_audio_clips = []
                 for idx, p in enumerate(beat_audio_paths):
@@ -779,32 +779,58 @@ class MangaProcessor:
                 logger.warning(f"Moviepy fallback bhi fail: {e2}")
                 audio_clip = None
 
-        # Simple continuous scroll: y = t * (scroll_range / total_duration)
-        # Audio ke saath perfectly sync — complex timeline ki zaroorat nahi
-        scroll_speed = scroll_range / max(0.01, actual_duration)
+        if not real_durations:
+            real_durations = list(beat_durations)
 
-        def get_y_at_time(t):
-            if scroll_range <= 0:
-                return 0
-            return max(0, min(scroll_range, int(t * scroll_speed)))
+        # ── Step 3: Beat-synced scroll timeline ──
+        # Har beat ka y_target = us beat ka proportional position panel mein
+        # (beat 0 = top, last beat = bottom)
+        # Scroll speed = us beat ke audio duration ke hisaab se
+        # → jahan dialog fast wahan camera fast scroll, jahan slow wahan slow
 
-        def _ken_burns(source_frame, t, dur, zoom_max=0.03):
-            if dur <= 0:
-                return source_frame
-            zoom = 1.0 + zoom_max * (t / dur)
-            if abs(zoom - 1.0) < 0.001:
-                return source_frame
-            sh, sw = source_frame.shape[:2]
-            zh = int(sh * zoom)
-            zw = int(sw * zoom)
-            zoomed = cv2.resize(source_frame, (zw, zh))
-            cy = (zh - sh) // 2
-            cx = (zw - sw) // 2
-            return zoomed[cy:cy + sh, cx:cx + sw]
+        # Panel load karo — ek baar, dono branches ke liye consistent
+        panel_rgb, is_tall, panel_h = self._load_scaled_panel(img_path)
 
-        if not is_tall or scroll_range <= 0:
-            # Horizontal / short panel — blurred bg + centered panel (screenshot 2/3 style)
-            # Original image se blurred bg banana — black bars nahi
+        # ── Tall panel display setup (80% width, blurred bg) ──
+        if is_tall and panel_h > CANVAS_H:
+            MARGIN = int(CANVAS_W * 0.10)
+            panel_display_w = CANVAS_W - 2 * MARGIN
+
+            orig_tall = cv2.imread(img_path)
+            if orig_tall is not None:
+                th, tw = orig_tall.shape[:2]
+                t_scale = panel_display_w / tw
+                t_scaled_w = panel_display_w
+                t_scaled_h = max(1, int(th * t_scale))
+                if t_scaled_h > 12000:
+                    t_scale2 = 12000 / t_scaled_h
+                    t_scaled_h = 12000
+                    t_scaled_w = max(1, int(t_scaled_w * t_scale2))
+                panel_display = cv2.resize(orig_tall, (t_scaled_w, t_scaled_h))
+                panel_display_rgb = cv2.cvtColor(panel_display, cv2.COLOR_BGR2RGB)
+                eff_scroll_range = max(0, t_scaled_h - CANVAS_H)
+
+                bg_scale2 = max(CANVAS_W / tw, CANVAS_H / th)
+                bg2_w = max(1, int(tw * bg_scale2))
+                bg2_h = max(1, int(th * bg_scale2))
+                bg2_res = cv2.resize(orig_tall, (bg2_w, bg2_h))
+                bx2 = (bg2_w - CANVAS_W) // 2
+                by2 = (bg2_h - CANVAS_H) // 2
+                bg2_crop = bg2_res[by2:by2 + CANVAS_H, bx2:bx2 + CANVAS_W]
+                bg2_blur = cv2.GaussianBlur(bg2_crop, (71, 71), 0)
+                bg2_dark = (bg2_blur * 0.40).clip(0, 255).astype(np.uint8)
+                bg_canvas = cv2.cvtColor(bg2_dark, cv2.COLOR_BGR2RGB)
+            else:
+                panel_display_rgb = panel_rgb
+                eff_scroll_range = max(0, panel_h - CANVAS_H)
+                bg_canvas = np.zeros((CANVAS_H, CANVAS_W, 3), dtype=np.uint8)
+
+            actual_panel_w = panel_display_rgb.shape[1]
+            x_start = (CANVAS_W - actual_panel_w) // 2
+            use_scroll = True
+        else:
+            # Horizontal / short panel — static centered, blurred bg
+            eff_scroll_range = 0
             orig_img = cv2.imread(img_path)
             if orig_img is not None:
                 oh, ow = orig_img.shape[:2]
@@ -815,14 +841,12 @@ class MangaProcessor:
                 bx = (bg_w - CANVAS_W) // 2
                 by = (bg_h - CANVAS_H) // 2
                 bg_crop = bg_res[by:by + CANVAS_H, bx:bx + CANVAS_W]
-                blur_k = 71
-                bg_blurred = cv2.GaussianBlur(bg_crop, (blur_k, blur_k), 0)
+                bg_blurred = cv2.GaussianBlur(bg_crop, (71, 71), 0)
                 bg_blurred = (bg_blurred * 0.45).clip(0, 255).astype(np.uint8)
                 canvas_base = cv2.cvtColor(bg_blurred, cv2.COLOR_BGR2RGB)
             else:
                 canvas_base = np.zeros((CANVAS_H, CANVAS_W, 3), dtype=np.uint8)
 
-            # Panel ko center mein overlay karo
             pw = panel_rgb.shape[1]
             ph = min(panel_h, CANVAS_H)
             x_off = max(0, (CANVAS_W - pw) // 2)
@@ -830,70 +854,77 @@ class MangaProcessor:
             x_end = min(CANVAS_W, x_off + pw)
             y_end = min(CANVAS_H, y_off + ph)
             canvas_base[y_off:y_end, x_off:x_end] = panel_rgb[:y_end - y_off, :x_end - x_off]
+            panel_display_rgb = None
+            x_start = 0
+            use_scroll = False
 
+        # ── Beat-synced scroll: timeline banao ──
+        # Har beat ka y_target proportionally spread hai (top se bottom)
+        # Scroll speed = uss beat ki audio duration pe depend karti hai
+        n_beats = max(1, len(beats))
+        timeline = []   # list of (t_start, t_end, y_start, y_end)
+        t_cursor = 0.0
+        for i, dur in enumerate(real_durations):
+            # Beat i ka center position: 0 se scroll_range tak linearly map
+            frac_start = i / n_beats
+            frac_end = (i + 1) / n_beats
+            y_s = int(frac_start * eff_scroll_range)
+            y_e = int(frac_end * eff_scroll_range)
+            timeline.append((t_cursor, t_cursor + dur, y_s, y_e))
+            t_cursor += dur
+
+        # Last beat end = actual audio end (rounding drift fix)
+        if timeline:
+            last = timeline[-1]
+            timeline[-1] = (last[0], actual_duration, last[2], eff_scroll_range)
+
+        def get_y_at_time(t):
+            """Beat-synced y: har beat apni audio duration mein scroll karta hai."""
+            if eff_scroll_range <= 0 or not timeline:
+                return 0
+            # Active segment dhundo
+            seg = timeline[-1]
+            for s in timeline:
+                if t <= s[1]:
+                    seg = s
+                    break
+            t_start, t_end, y_s, y_e = seg
+            seg_dur = max(0.001, t_end - t_start)
+            progress = max(0.0, min(1.0, (t - t_start) / seg_dur))
+            # Smooth ease-in-out — abrupt jump nahi, smooth scroll
+            progress = progress * progress * (3 - 2 * progress)
+            return max(0, min(eff_scroll_range, int(y_s + (y_e - y_s) * progress)))
+
+        def _ken_burns(source_frame, t, dur, zoom_max=0.02):
+            if dur <= 0 or zoom_max <= 0:
+                return source_frame
+            zoom = 1.0 + zoom_max * (t / max(0.01, dur))
+            if abs(zoom - 1.0) < 0.001:
+                return source_frame
+            sh, sw = source_frame.shape[:2]
+            zh = int(sh * zoom)
+            zw = int(sw * zoom)
+            zoomed = cv2.resize(source_frame, (zw, zh))
+            cy = (zh - sh) // 2
+            cx = (zw - sw) // 2
+            return zoomed[cy:cy + sh, cx:cx + sw]
+
+        if use_scroll:
             def make_frame(t):
-                return _ken_burns(canvas_base, t, actual_duration, zoom_max=0.04)
-        else:
-            # Tall vertical panel — 10% margin dono side, blurred bg
-            # Panel width = 80% of CANVAS_W (10% left + 10% right padding)
-            MARGIN = int(CANVAS_W * 0.10)
-            panel_display_w = CANVAS_W - 2 * MARGIN  # 1024px
-
-            # Scale panel to fit in panel_display_w width
-            orig_tall = cv2.imread(img_path)
-            if orig_tall is not None:
-                th, tw = orig_tall.shape[:2]
-                # Scale so width = panel_display_w
-                t_scale = panel_display_w / tw
-                t_scaled_w = panel_display_w
-                t_scaled_h = max(1, int(th * t_scale))
-                if t_scaled_h > 12000:
-                    t_scale2 = 12000 / t_scaled_h
-                    t_scaled_h = 12000
-                    t_scaled_w = max(1, int(t_scaled_w * t_scale2))
-                panel_display = cv2.resize(orig_tall, (t_scaled_w, t_scaled_h))
-                panel_display_rgb = cv2.cvtColor(panel_display, cv2.COLOR_BGR2RGB)
-                scroll_range_display = max(0, t_scaled_h - CANVAS_H)
-
-                # Blurred bg from original
-                bg_scale2 = max(CANVAS_W / tw, CANVAS_H / th)
-                bg2_w = max(1, int(tw * bg_scale2))
-                bg2_h = max(1, int(th * bg_scale2))
-                bg2_res = cv2.resize(orig_tall, (bg2_w, bg2_h))
-                bx2 = (bg2_w - CANVAS_W) // 2
-                by2 = (bg2_h - CANVAS_H) // 2
-                bg2_crop = bg2_res[by2:by2 + CANVAS_H, bx2:bx2 + CANVAS_W]
-                bg2_blur = cv2.GaussianBlur(bg2_crop, (71, 71), 0)
-                bg2_dark = (bg2_blur * 0.40).clip(0, 255).astype(np.uint8)
-                bg2_rgb = cv2.cvtColor(bg2_dark, cv2.COLOR_BGR2RGB)
-            else:
-                panel_display_rgb = panel_rgb
-                scroll_range_display = scroll_range
-                bg2_rgb = np.zeros((CANVAS_H, CANVAS_W, 3), dtype=np.uint8)
-
-            # Actual panel width after scaling (may be less than panel_display_w if height capped)
-            actual_panel_w = panel_display_rgb.shape[1]
-            # Center the panel horizontally
-            x_start = (CANVAS_W - actual_panel_w) // 2
-            x_end_paste = x_start + actual_panel_w
-
-            # Override scroll_range for tall panel (get_y_at_time uses outer scroll_range)
-            # We re-clamp here to scroll_range_display
-            def make_frame(t):
-                y2 = get_y_at_time(t)
-                y2 = max(0, min(scroll_range_display, y2))
-                ph_display = panel_display_rgb.shape[0]
-                slice_h = min(CANVAS_H, ph_display - y2)
-                panel_slice = panel_display_rgb[y2:y2 + slice_h, 0:actual_panel_w]
-
-                # Start from blurred bg
-                frame = bg2_rgb.copy()
-                # Paste panel centered — actual width, no hardcoded assumptions
-                paste_h = panel_slice.shape[0]
-                paste_w = panel_slice.shape[1]
-                frame[0:paste_h, x_start:x_start + paste_w] = panel_slice
-
+                y = get_y_at_time(t)
+                ph_d = panel_display_rgb.shape[0]
+                # Crop bug fix: slice_h kabhi bhi CANVAS_H se zyada nahi hoga
+                slice_end = min(ph_d, y + CANVAS_H)
+                slice_h = slice_end - y
+                if slice_h <= 0:
+                    return bg_canvas.copy()
+                panel_slice = panel_display_rgb[y:y + slice_h, 0:actual_panel_w]
+                frame = bg_canvas.copy()
+                frame[0:slice_h, x_start:x_start + actual_panel_w] = panel_slice
                 return _ken_burns(frame, t, actual_duration, zoom_max=0.02)
+        else:
+            def make_frame(t):
+                return _ken_burns(canvas_base, t, actual_duration, zoom_max=0.02)
 
         video_clip = VideoClip(make_frame, duration=actual_duration)
         if audio_clip:
@@ -902,75 +933,7 @@ class MangaProcessor:
         return video_clip
 
     # ─────────────────────────────────────────
-    # 6b. Intro title screen clip
-    # FIX #1: AudioArrayClip ab properly import ho raha hai upar se
-    # ─────────────────────────────────────────
-    def _make_intro_clip(self, title: str, duration: float = 3.0):
-        from PIL import Image as PILImage, ImageDraw, ImageFont
-        import textwrap
-
-        frame = np.zeros((CANVAS_H, CANVAS_W, 3), dtype=np.uint8)
-        for y in range(CANVAS_H):
-            val = int(15 + 20 * (y / CANVAS_H))
-            frame[y, :] = [val, val, val]
-
-        pil_img = PILImage.fromarray(frame)
-        draw = ImageDraw.Draw(pil_img)
-
-        try:
-            font_big = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 52)
-            font_sub = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 28)
-        except Exception:
-            font_big = ImageFont.load_default()
-            font_sub = font_big
-
-        wrapped = textwrap.wrap(title, width=18) or [title]
-        line_h = 65
-        total_h = len(wrapped) * line_h
-        y_start = (CANVAS_H - total_h) // 2 - 40
-
-        accent_y = y_start - 30
-        draw.rectangle([(CANVAS_W // 2 - 60, accent_y), (CANVAS_W // 2 + 60, accent_y + 4)],
-                        fill=(220, 30, 30))
-
-        for i, line in enumerate(wrapped):
-            bbox = draw.textbbox((0, 0), line, font=font_big)
-            tw = bbox[2] - bbox[0]
-            x = (CANVAS_W - tw) // 2
-            y = y_start + i * line_h
-            draw.text((x + 3, y + 3), line, font=font_big, fill=(0, 0, 0, 180))
-            draw.text((x, y), line, font=font_big, fill=(255, 255, 255))
-
-        sub_text = "📖 Manga Story"
-        bbox2 = draw.textbbox((0, 0), sub_text, font=font_sub)
-        sw = bbox2[2] - bbox2[0]
-        draw.text(((CANVAS_W - sw) // 2, y_start + total_h + 20), sub_text,
-                    font=font_sub, fill=(180, 180, 180))
-
-        intro_arr = np.array(pil_img)
-
-        def make_intro_frame(t):
-            alpha = 1.0
-            if t < 0.5:
-                alpha = t / 0.5
-            elif t > duration - 0.5:
-                alpha = (duration - t) / 0.5
-            alpha = max(0.0, min(1.0, alpha))
-            return (intro_arr * alpha).astype(np.uint8)
-
-        video = VideoClip(make_intro_frame, duration=duration)
-
-        # moviepy 1.0.3 mein AudioArrayClip nahi hai — AudioClip lambda use karo
-        silent_audio = AudioClip(
-            lambda t: np.zeros((1, 2)) if np.isscalar(t) else np.zeros((len(t), 2)),
-            duration=duration,
-            fps=44100
-        )
-        return video.set_audio(silent_audio)
-
-    # ─────────────────────────────────────────
     # 7. Full video pipeline
-    # FIX #2: story_title bot.py se ab pass hoga
     # ─────────────────────────────────────────
     async def create_video_from_panels(self, image_paths: list,
                                         panel_beats: list,
@@ -985,29 +948,6 @@ class MangaProcessor:
 
         loop = asyncio.get_event_loop()
         part_paths = []
-
-        # Intro screen
-        intro_part_path = None
-        try:
-            intro_clip = self._make_intro_clip(story_title, duration=3.0)
-            intro_tmp = tempfile.NamedTemporaryFile(suffix='_intro.mp4', delete=False)
-            intro_part_path = intro_tmp.name
-            intro_tmp.close()
-            self.temp_files.append(intro_part_path)
-            intro_audio_tmp = os.path.join(tempfile.gettempdir(), f'manga_intro_audio_{os.getpid()}.m4a')
-            self.temp_files.append(intro_audio_tmp)
-            await loop.run_in_executor(
-                None,
-                lambda c=intro_clip, p=intro_part_path, pa=intro_audio_tmp: c.write_videofile(
-                    p, fps=24, codec='libx264', audio_codec='aac',
-                    temp_audiofile=pa, remove_temp=True,
-                    threads=2, preset='ultrafast', verbose=False, logger=None,
-                )
-            )
-            logger.info("Intro render ho gaya")
-        except Exception as e:
-            logger.warning(f"Intro clip error: {e} — skip")
-            intro_part_path = None
 
         # Panel-by-panel render
         for idx, (img_path, beats) in enumerate(zip(image_paths, panel_beats)):
@@ -1071,8 +1011,6 @@ class MangaProcessor:
                 mode='w', suffix='_concat.txt', delete=False)
             concat_list_path = concat_list_f.name
             self.temp_files.append(concat_list_path)
-            if intro_part_path and os.path.exists(intro_part_path):
-                concat_list_f.write(f"file '{intro_part_path}'\n")
             for p in part_paths:
                 concat_list_f.write(f"file '{p}'\n")
             concat_list_f.close()
