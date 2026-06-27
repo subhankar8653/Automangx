@@ -1013,6 +1013,18 @@ class MangaProcessor:
 
         video_clip = VideoClip(make_frame, duration=actual_duration)
         if audio_clip:
+            # ── SYNC FIX: Video duration ko fps-aligned karo ──
+            # write_videofile fps=24 se frame count = int(dur * 24) frames banata hai
+            # phir actual video duration = frame_count / 24 — yeh audio se slightly alag hota hai
+            # Fix: duration ko nearest frame boundary pe snap karo PEHLE set_audio se
+            FPS = 24
+            frame_count = round(actual_duration * FPS)
+            fps_aligned_duration = frame_count / FPS
+            if abs(fps_aligned_duration - actual_duration) > 0.001:
+                logger.debug(f"Duration snap: {actual_duration:.4f}s → {fps_aligned_duration:.4f}s ({frame_count} frames)")
+            video_clip = VideoClip(make_frame, duration=fps_aligned_duration)
+            # Audio ko bhi same duration pe trim karo — exact match
+            audio_clip = audio_clip.subclip(0, min(fps_aligned_duration, audio_clip.duration))
             video_clip = video_clip.set_audio(audio_clip)
 
         return video_clip
@@ -1056,8 +1068,10 @@ class MangaProcessor:
                     lambda c=clip, p=part_path, pa=part_audio_tmp: c.write_videofile(
                         p, fps=24, codec='libx264',
                         audio_codec='aac' if c.audio is not None else None,
+                        audio_bitrate='192k' if c.audio is not None else None,
                         temp_audiofile=pa if c.audio is not None else None,
                         remove_temp=True, threads=2, preset='ultrafast',
+                        ffmpeg_params=['-vsync', 'cfr'] if c.audio is not None else [],
                         verbose=False, logger=None,
                     )
                 )
@@ -1119,11 +1133,17 @@ class MangaProcessor:
                     merged_tmp.close()
                     self.temp_files.append(merged_path)
 
+                    # ── SYNC FIX: -c:v copy NAHI — re-encode karo ──
+                    # -c:v copy ke saath har part ka PTS alag basis pe hota hai
+                    # concat ke baad accumulated drift banता hai — last panels pe voice aage, video peeche
+                    # Solution: re-encode with -vsync cfr (constant frame rate) — PTS reset hota hai
                     cmd_concat = [
                         'ffmpeg', '-y', '-f', 'concat', '-safe', '0',
                         '-i', concat_list_path,
-                        '-c:v', 'copy',
-                        '-c:a', 'aac', '-b:a', '128k',
+                        '-c:v', 'libx264', '-preset', 'ultrafast',
+                        '-vsync', 'cfr', '-r', '24',          # constant frame rate — PTS reset
+                        '-c:a', 'aac', '-b:a', '192k',
+                        '-af', 'aresample=async=1000',         # audio drift correction
                         merged_path
                     ]
                     subprocess.run(cmd_concat, check=True, capture_output=True)
@@ -1145,13 +1165,16 @@ class MangaProcessor:
                         '-filter_complex', audio_filter,
                         '-map', '0:v', '-map', '[aout]',
                         '-c:v', 'libx264', '-preset', 'ultrafast',
-                        '-c:a', 'aac', '-shortest',
+                        '-vsync', 'cfr', '-r', '24',
+                        '-c:a', 'aac', '-b:a', '192k',
+                        '-shortest',
                         output_path
                     ]
                     subprocess.run(cmd_parts, check=True, capture_output=True)
                     logger.info("BGM mix ho gaya")
 
                 else:
+                    # ── SYNC FIX: -c:v copy → re-encode + vsync cfr ──
                     cmd = [
                         'ffmpeg', '-y', '-f', 'concat', '-safe', '0',
                         '-i', concat_list_path,
@@ -1160,7 +1183,9 @@ class MangaProcessor:
                         cmd += ['-vf', vf_filter]
                     cmd += [
                         '-c:v', 'libx264', '-preset', 'ultrafast',
-                        '-c:a', 'aac', '-b:a', '128k',
+                        '-vsync', 'cfr', '-r', '24',
+                        '-c:a', 'aac', '-b:a', '192k',
+                        '-af', 'aresample=async=1000',
                     ]
                     cmd.append(output_path)
                     subprocess.run(cmd, check=True, capture_output=True)
