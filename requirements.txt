@@ -1,6 +1,7 @@
 python-telegram-bot==22.8
 google-genai==1.12.0
 gtts==2.5.1
+edge-tts==6.1.12
 moviepy==1.0.3
 opencv-python-headless==4.9.0.80
 Pillow==10.2.0

@@ -16,7 +16,7 @@ _settings_collection = _db["user_settings"]
 # ─────────────────────────────────────────
 DEFAULT_SETTINGS = {
     "quality": "720p",      # 360p, 480p, 720p, 1080p, 4K
-    "voice": "hi-female",   # hi-female, hi-male
+    "voice": "hi-female",   # hi-female, hi-male, hi-female-alt
     "bgm_enabled": True,
     "bgm_volume": 30,       # 0-100 (%)
     "text_removal": False,  # True = panel ka text/speech-bubble hata do, False = waisa hi rakho
@@ -30,9 +30,29 @@ QUALITY_OPTIONS = {
     "4K": 2160,
 }
 
+# ─────────────────────────────────────────
+# Voice options — edge-tts (Microsoft Neural) primary
+# gTTS automatically fallback hoga agar edge-tts fail ho
+# ─────────────────────────────────────────
 VOICE_OPTIONS = {
-    "hi-female": {"lang": "hi", "tld": "co.in", "label": "Hindi Female 🙆‍♀️"},
-    "hi-male": {"lang": "hi", "tld": "com", "label": "Hindi Male 🙆‍♂️"},
+    "hi-female": {
+        "label": "Hindi Female — Swara 🙆‍♀️",
+        "engine": "edge",
+        "edge_voice": "hi-IN-SwaraNeural",
+        "gtts_tld": "co.in",
+    },
+    "hi-male": {
+        "label": "Hindi Male — Madhur 🙆‍♂️",
+        "engine": "edge",
+        "edge_voice": "hi-IN-MadhurNeural",
+        "gtts_tld": "com",
+    },
+    "hi-female-alt": {
+        "label": "Hindi Female Alt — Ananya 🌸",
+        "engine": "edge",
+        "edge_voice": "hi-IN-AnanyaNeural",
+        "gtts_tld": "co.in",
+    },
 }
 
 

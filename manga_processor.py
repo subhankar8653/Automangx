@@ -14,6 +14,11 @@ from PIL import Image
 from google import genai
 from google.genai import types
 from gtts import gTTS
+try:
+    import edge_tts
+    EDGE_TTS_AVAILABLE = True
+except ImportError:
+    EDGE_TTS_AVAILABLE = False
 from moviepy.editor import (
     ImageClip, AudioClip, AudioFileClip, concatenate_videoclips, concatenate_audioclips,
     CompositeAudioClip, CompositeVideoClip, VideoClip, VideoFileClip, afx
@@ -57,11 +62,25 @@ CANVAS_W, CANVAS_H = 1280, 720  # 16:9 landscape
 
 class MangaProcessor:
 
-    BEAT_PAUSE = 0.15  # beats ke beech silence gap — thoda breathing room
+    BEAT_PAUSE = 0.20  # beats ke beech silence gap — thoda breathing room
 
     MIN_GEMINI_GAP = 6.5  # seconds per key (free tier: 10 RPM)
 
-    AUDIO_SPEED = 1.25  # 1.4 pe robotic lagti thi, 1.25 natural + fast enough
+    AUDIO_SPEED = 1.15  # edge-tts already fast hai, 1.15 natural lagti hai
+
+    # edge-tts voice map — Microsoft Neural voices (gTTS se kaafi better quality)
+    EDGE_VOICE_MAP = {
+        "hi-female":       "hi-IN-SwaraNeural",    # natural Hindi female
+        "hi-male":         "hi-IN-MadhurNeural",   # natural Hindi male
+        "hi-female-alt":   "hi-IN-AnanyaNeural",   # alternate female (newer)
+    }
+
+    # gTTS fallback map (agar edge-tts kaam na kare)
+    VOICE_TLD_MAP = {
+        "hi-female":     "co.in",
+        "hi-male":       "com",
+        "hi-female-alt": "co.in",
+    }
 
     # FIX #4: Blank panel threshold 0.90 → 0.96 — sirf EXTREME white panels skip
     # Previous 0.90 threshold ne bahut saare valid light-bg panels skip kar diye the
@@ -594,47 +613,128 @@ class MangaProcessor:
             all_beats.append(beats)
         return all_beats, ctx
 
-    # gTTS voice map
-    VOICE_TLD_MAP = {
-        "hi-female": "co.in",
-        "hi-male": "com",
-    }
+    async def _tts_edge(self, text: str, raw_path: str, voice: str) -> bool:
+        """
+        edge-tts se audio generate karo.
+        Returns True on success, False on failure.
+        edge-tts natively async hai — executor ki zaroorat nahi.
+        """
+        try:
+            edge_voice = self.EDGE_VOICE_MAP.get(voice, "hi-IN-SwaraNeural")
+            communicate = edge_tts.Communicate(text=text, voice=edge_voice)
+            await communicate.save(raw_path)
+            return os.path.exists(raw_path) and os.path.getsize(raw_path) > 0
+        except Exception as e:
+            logger.warning(f"edge-tts fail ({e})")
+            return False
+
+    def _tts_gtts_sync(self, text: str, raw_path: str, voice: str):
+        """gTTS fallback — sync, run in executor se call karo."""
+        tld = self.VOICE_TLD_MAP.get(voice, "co.in")
+        gTTS(text=text, lang='hi', tld=tld, slow=False).save(raw_path)
+
+    def _apply_speed_ffmpeg(self, input_path: str, output_path: str, speed: float) -> float:
+        """
+        ffmpeg atempo filter se proper speed change karo.
+        atempo range: 0.5 – 2.0 (chained karo agar zyada chahiye)
+        Pitch preserve hota hai — pydub frame_rate hack se kaafi better.
+        Returns actual duration in seconds after speedup.
+        """
+        import subprocess
+        from pydub import AudioSegment
+
+        # atempo 0.5-2.0 range mein hi kaam karta hai
+        # agar speed > 2.0 ya < 0.5 to chain karo
+        def _atempo_chain(s: float) -> str:
+            filters = []
+            while s > 2.0:
+                filters.append("atempo=2.0")
+                s /= 2.0
+            while s < 0.5:
+                filters.append("atempo=0.5")
+                s /= 0.5
+            filters.append(f"atempo={s:.4f}")
+            return ",".join(filters)
+
+        atempo_str = _atempo_chain(speed)
+        cmd = [
+            'ffmpeg', '-y', '-i', input_path,
+            '-filter:a', atempo_str,
+            '-vn', '-c:a', 'libmp3lame', '-q:a', '3',
+            output_path
+        ]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True)
+            sound = AudioSegment.from_file(output_path)
+            return len(sound) / 1000.0
+        except Exception as e:
+            logger.warning(f"ffmpeg atempo fail ({e}) — original use karo")
+            # fallback: original file hi use karo
+            import shutil
+            shutil.copy2(input_path, output_path)
+            sound = AudioSegment.from_file(output_path)
+            return len(sound) / 1000.0
 
     async def text_to_speech(self, text: str, output_path: str, voice: str = "hi-female") -> float:
-        tld = self.VOICE_TLD_MAP.get(voice, "co.in")
+        """
+        TTS pipeline:
+        1. edge-tts try karo (better quality, Microsoft Neural)
+        2. Agar fail → gTTS fallback
+        3. AUDIO_SPEED != 1.0 → ffmpeg atempo se pitch-safe speedup
+        Returns: actual audio duration in seconds (after speed).
+        """
         loop = asyncio.get_event_loop()
-        result = {"duration": 0.0}
+        raw_path = output_path + '.raw.mp3'
+        self.temp_files.append(raw_path)
 
-        def _gen():
-            gTTS(text=text, lang='hi', tld=tld, slow=False).save(output_path)
+        # ── Step 1: TTS generate ──
+        success = False
+        if EDGE_TTS_AVAILABLE:
+            success = await self._tts_edge(text, raw_path, voice)
+            if success:
+                logger.debug(f"edge-tts OK: {voice}")
 
+        if not success:
+            # gTTS fallback
+            try:
+                await loop.run_in_executor(None, self._tts_gtts_sync, text, raw_path, voice)
+                success = os.path.exists(raw_path) and os.path.getsize(raw_path) > 0
+                if success:
+                    logger.debug(f"gTTS fallback OK: {voice}")
+            except Exception as e:
+                logger.error(f"gTTS bhi fail ho gaya: {e}")
+                return 1.5
+
+        if not success:
+            return 1.5
+
+        # ── Step 2: Speed adjust via ffmpeg atempo ──
+        if self.AUDIO_SPEED and abs(self.AUDIO_SPEED - 1.0) > 0.01:
+            sped_path = output_path + '.sped.mp3'
+            self.temp_files.append(sped_path)
+            duration = await loop.run_in_executor(
+                None, self._apply_speed_ffmpeg, raw_path, sped_path, self.AUDIO_SPEED
+            )
+            # Final output pe move karo
+            try:
+                os.replace(sped_path, output_path)
+            except Exception:
+                import shutil
+                shutil.copy2(sped_path, output_path)
+        else:
+            # No speed change — raw == final
+            try:
+                os.replace(raw_path, output_path)
+            except Exception:
+                import shutil
+                shutil.copy2(raw_path, output_path)
             from pydub import AudioSegment
-            sound = AudioSegment.from_file(output_path)
+            try:
+                duration = len(AudioSegment.from_file(output_path)) / 1000.0
+            except Exception:
+                duration = 1.5
 
-            if self.AUDIO_SPEED and self.AUDIO_SPEED != 1.0:
-                sped_path = output_path + '.sped.mp3'
-                try:
-                    new_rate = int(sound.frame_rate * self.AUDIO_SPEED)
-                    fast_sound = sound._spawn(
-                        sound.raw_data,
-                        overrides={"frame_rate": new_rate}
-                    ).set_frame_rate(sound.frame_rate)
-                    fast_sound.export(sped_path, format="mp3")
-                    os.replace(sped_path, output_path)
-                    result["duration"] = len(fast_sound) / 1000.0
-                except Exception as e:
-                    logger.warning(f"Audio speed-up fail ({e})")
-                    if os.path.exists(sped_path):
-                        try:
-                            os.remove(sped_path)
-                        except Exception:
-                            pass
-                    result["duration"] = len(sound) / 1000.0
-            else:
-                result["duration"] = len(sound) / 1000.0
-
-        await loop.run_in_executor(None, _gen)
-        return result["duration"]
+        return duration
 
     # ─────────────────────────────────────────
     # 5. Panel ko CANVAS mein scale karo
@@ -728,23 +828,27 @@ class MangaProcessor:
         try:
             from pydub import AudioSegment
             silence_ms = int(self.BEAT_PAUSE * 1000)
-            silence_seg = AudioSegment.silent(duration=silence_ms)
 
             combined = AudioSegment.empty()
             valid_count = 0
             for idx, p in enumerate(beat_audio_paths):
                 if os.path.exists(p) and os.path.getsize(p) > 0:
                     seg = AudioSegment.from_file(p)
+                    # ── Audio quality normalize: stereo + 44.1kHz consistent ──
+                    seg = seg.set_channels(2).set_frame_rate(44100)
                     seg_dur_s = len(seg) / 1000.0
                     combined += seg
-                    combined += silence_seg
+                    # Silence bhi stereo 44.1kHz match karo — channel mismatch se desync hota tha
+                    combined += AudioSegment.silent(duration=silence_ms, frame_rate=44100).set_channels(2)
                     real_durations.append(seg_dur_s + self.BEAT_PAUSE)
                     valid_count += 1
                 else:
                     fallback_dur_ms = int((beat_durations[idx] - self.BEAT_PAUSE) * 1000)
-                    fallback_seg = AudioSegment.silent(duration=max(500, fallback_dur_ms))
+                    fallback_seg = AudioSegment.silent(
+                        duration=max(500, fallback_dur_ms), frame_rate=44100
+                    ).set_channels(2)
                     combined += fallback_seg
-                    combined += silence_seg
+                    combined += AudioSegment.silent(duration=silence_ms, frame_rate=44100).set_channels(2)
                     real_durations.append((max(500, fallback_dur_ms) / 1000.0) + self.BEAT_PAUSE)
 
             if valid_count > 0 and len(combined) > 0:
@@ -753,10 +857,12 @@ class MangaProcessor:
                 combined_audio_path = combined_tmp.name
                 combined_tmp.close()
                 self.temp_files.append(combined_audio_path)
-                combined.export(combined_audio_path, format="mp3", bitrate="128k")
+                # 192k bitrate — better quality, edge-tts ka full benefit milega
+                combined.export(combined_audio_path, format="mp3", bitrate="192k")
+                # ── Exact duration: file se measure karo, estimated sum se nahi ──
                 actual_duration = len(combined) / 1000.0
                 audio_clip = AudioFileClip(combined_audio_path)
-                logger.info(f"Audio: {actual_duration:.2f}s, {valid_count} beats")
+                logger.info(f"Audio: {actual_duration:.2f}s, {valid_count} beats, 44.1kHz stereo")
             else:
                 logger.warning("Koi valid beat audio nahi")
                 real_durations = list(beat_durations)
