@@ -900,23 +900,25 @@ class MangaProcessor:
                 scroll_range_display = scroll_range
                 bg2_rgb = np.zeros((CANVAS_H, CANVAS_W, 3), dtype=np.uint8)
 
+            # Actual panel width after scaling (may be less than panel_display_w if height capped)
+            actual_panel_w = panel_display_rgb.shape[1]
+            # Center the panel horizontally
+            x_start = (CANVAS_W - actual_panel_w) // 2
+            x_end_paste = x_start + actual_panel_w
+
             def make_frame(t):
                 y2 = get_y_at_time(t)
                 y2 = max(0, min(scroll_range_display, y2))
                 ph_display = panel_display_rgb.shape[0]
                 slice_h = min(CANVAS_H, ph_display - y2)
-                panel_slice = panel_display_rgb[y2:y2 + slice_h, 0:panel_display_w]
+                panel_slice = panel_display_rgb[y2:y2 + slice_h, 0:actual_panel_w]
 
                 # Start from blurred bg
                 frame = bg2_rgb.copy()
-                # Paste panel in center with margin
-                paste_y_end = min(CANVAS_H, slice_h)
-                paste_x_end = min(CANVAS_W, MARGIN + panel_display_w)
-                frame[0:paste_y_end, MARGIN:paste_x_end] = panel_slice[:paste_y_end, :paste_x_end - MARGIN]
-
-                # Pad bottom if needed
-                if slice_h < CANVAS_H:
-                    pass  # bg already fills rest
+                # Paste panel centered — actual width, no hardcoded assumptions
+                paste_h = panel_slice.shape[0]
+                paste_w = panel_slice.shape[1]
+                frame[0:paste_h, x_start:x_start + paste_w] = panel_slice
 
                 return _ken_burns(frame, t, actual_duration, zoom_max=0.02)
 
