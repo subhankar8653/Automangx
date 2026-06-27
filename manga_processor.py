@@ -57,7 +57,7 @@ CANVAS_W, CANVAS_H = 1280, 720  # 16:9 landscape
 
 class MangaProcessor:
 
-    BEAT_PAUSE = 0.30  # beats ke beech silence gap
+    BEAT_PAUSE = 0.05  # beats ke beech silence gap — kam pause = smooth narrator
 
     MIN_GEMINI_GAP = 6.5  # seconds per key (free tier: 10 RPM)
 
@@ -863,17 +863,62 @@ class MangaProcessor:
             def make_frame(t):
                 return _ken_burns(canvas_base, t, actual_duration, zoom_max=0.04)
         else:
-            # Tall vertical panel — crop a CANVAS_H window at beat position (full bleed)
+            # Tall vertical panel — 10% margin dono side, blurred bg
+            # Panel width = 80% of CANVAS_W (10% left + 10% right padding)
+            MARGIN = int(CANVAS_W * 0.10)
+            panel_display_w = CANVAS_W - 2 * MARGIN  # 1024px
+
+            # Scale panel to fit in panel_display_w width
+            orig_tall = cv2.imread(img_path)
+            if orig_tall is not None:
+                th, tw = orig_tall.shape[:2]
+                # Scale so width = panel_display_w
+                t_scale = panel_display_w / tw
+                t_scaled_w = panel_display_w
+                t_scaled_h = max(1, int(th * t_scale))
+                if t_scaled_h > 12000:
+                    t_scale2 = 12000 / t_scaled_h
+                    t_scaled_h = 12000
+                    t_scaled_w = max(1, int(t_scaled_w * t_scale2))
+                panel_display = cv2.resize(orig_tall, (t_scaled_w, t_scaled_h))
+                panel_display_rgb = cv2.cvtColor(panel_display, cv2.COLOR_BGR2RGB)
+                scroll_range_display = max(0, t_scaled_h - CANVAS_H)
+
+                # Blurred bg from original
+                bg_scale2 = max(CANVAS_W / tw, CANVAS_H / th)
+                bg2_w = max(1, int(tw * bg_scale2))
+                bg2_h = max(1, int(th * bg_scale2))
+                bg2_res = cv2.resize(orig_tall, (bg2_w, bg2_h))
+                bx2 = (bg2_w - CANVAS_W) // 2
+                by2 = (bg2_h - CANVAS_H) // 2
+                bg2_crop = bg2_res[by2:by2 + CANVAS_H, bx2:bx2 + CANVAS_W]
+                bg2_blur = cv2.GaussianBlur(bg2_crop, (71, 71), 0)
+                bg2_dark = (bg2_blur * 0.40).clip(0, 255).astype(np.uint8)
+                bg2_rgb = cv2.cvtColor(bg2_dark, cv2.COLOR_BGR2RGB)
+            else:
+                panel_display_rgb = panel_rgb
+                scroll_range_display = scroll_range
+                bg2_rgb = np.zeros((CANVAS_H, CANVAS_W, 3), dtype=np.uint8)
+
             def make_frame(t):
-                y = get_y_at_time(t)
-                y = max(0, min(scroll_range, y))
-                # Crop exactly CANVAS_H rows, full CANVAS_W width → fills screen
-                crop = panel_rgb[y:y + CANVAS_H, 0:CANVAS_W]
-                # Pad bottom if crop is short (shouldn't happen but safety)
-                if crop.shape[0] < CANVAS_H:
-                    pad = np.zeros((CANVAS_H - crop.shape[0], CANVAS_W, 3), dtype=np.uint8)
-                    crop = np.vstack([crop, pad])
-                return _ken_burns(crop, t, actual_duration, zoom_max=0.02)
+                y2 = get_y_at_time(t)
+                y2 = max(0, min(scroll_range_display, y2))
+                ph_display = panel_display_rgb.shape[0]
+                slice_h = min(CANVAS_H, ph_display - y2)
+                panel_slice = panel_display_rgb[y2:y2 + slice_h, 0:panel_display_w]
+
+                # Start from blurred bg
+                frame = bg2_rgb.copy()
+                # Paste panel in center with margin
+                paste_y_end = min(CANVAS_H, slice_h)
+                paste_x_end = min(CANVAS_W, MARGIN + panel_display_w)
+                frame[0:paste_y_end, MARGIN:paste_x_end] = panel_slice[:paste_y_end, :paste_x_end - MARGIN]
+
+                # Pad bottom if needed
+                if slice_h < CANVAS_H:
+                    pass  # bg already fills rest
+
+                return _ken_burns(frame, t, actual_duration, zoom_max=0.02)
 
         video_clip = VideoClip(make_frame, duration=actual_duration)
         if audio_clip:
