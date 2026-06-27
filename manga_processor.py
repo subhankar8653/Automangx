@@ -292,33 +292,26 @@ class MangaProcessor:
             "📖 Yeh PEHLA panel hai is comic ka — koi pichla context nahi hai.\n\n"
         )
 
-        # Prompt: clean narrator, no double explanation, no personal reactions
+        # Prompt: short beats, strict sync, no extra narration
         prompt = (
-            "Tu ek YouTube manga Hindi narrator hai. Seedha kahani suna — "
-            "jaise koi dost excited hokar story bata raha ho.\n\n"
+            "Tu ek YouTube manga Hindi narrator hai. Seedha aur fast bata — "
+            "jaise koi dost 30 second mein poori scene explain kare.\n\n"
             + context_block +
             "Is panel ko TOP se BOTTOM tak dekh aur beats mein bata:\n\n"
-            "RULES:\n"
-            "1. Har beat = ek visual scene ya dialogue moment. Jo panel mein "
-            "dikh raha hai wahi bata — dialogue + expression ek saath.\n"
+            "STRICT RULES:\n"
+            "1. Har beat = sirf EK moment — dialogue ya action, dono ek saath.\n"
             "   SAHI: 'Rote hue usne kaha — main tumhe bacha nahi paya...'\n"
-            "   GALAT: 'Usne kaha main tumhe bacha nahi paya. [alag beat] Woh ro raha tha.'\n"
-            "2. Dialogue aur uski expression/action EK HI beat mein honi chahiye — "
-            "alag-alag mat todo.\n"
-            "3. Kisi bhi language ke speech bubbles ka meaning Hindi/Hinglish mein "
-            "naturally retell karo — word-by-word translation nahi.\n"
-            "4. Character naam pata ho to naam lo, warna visual description ('woh ladki', "
-            "'tall aadmi').\n"
-            "5. BILKUL MAT KARO:\n"
-            "   - Apni personal reaction ya commentary ('yaar mera dil bhar aaya', "
-            "'kitna dukh hai', 'main toh ro dunga') — yeh extra hai, viewer ko lagta "
-            "hai narrator zyada bol raha hai\n"
-            "   - Dialogue ke baad alag se explain karna ('matlab woh bahut dukhi tha') — "
-            "expression already dialogue ke saath aa gayi to dobara mat bolo\n"
-            "   - Generic filler ('is panel mein...', 'yahan scene hai ki...')\n"
-            "   - Koi bhi cheez jo panel mein dikh nahi rahi\n"
-            "6. Beat length: 1 sentence, max 2 — sirf wahi jo is exact visual moment mein "
-            "ho raha hai.\n\n"
+            "   GALAT: 'Usne kaha kuch. [alag beat] Woh ro raha tha.'\n"
+            "2. Har beat SIRF 1 sentence — max 15 words. Zyada nahi.\n"
+            "3. Speech bubbles ko Hindi mein naturally retell karo — translate mat karo.\n"
+            "4. Character naam use karo agar panel mein dikh raha ho.\n"
+            "5. FORBIDDEN (yeh likhoge toh output reject hoga):\n"
+            "   - Apni reaction: 'waah', 'kya scene hai', 'dil bhar aaya' etc.\n"
+            "   - Dialogue ke baad explanation: 'matlab woh dukhi tha', 'iska matlab...'\n"
+            "   - Filler: 'is panel mein', 'yahan', 'dekho', 'aur phir'\n"
+            "   - Koi bhi cheez jo panel mein clearly nahi dikh rahi\n"
+            "6. Jo bol rahe ho wahi screen pe dikh raha hona chahiye — sync zaroori hai.\n"
+            "7. Beats ki sankhya: jo scene mein distinct moments hain utne — faaltu beat mat banao.\n\n"
             "SIRF JSON return karo:\n"
             '{"beats": [{"position": 10, "text": "..."}, {"position": 70, "text": "..."}], '
             '"updated_context": "2-3 sentence summary of story so far"}'
@@ -471,21 +464,22 @@ class MangaProcessor:
 
         batch_prompt = (
             "Tu ek YouTube manga Hindi narrator hai. Tujhe 2 manga panels diye ja rahe "
-            "hain (Panel 1 aur Panel 2). Dono ko top-to-bottom order mein suna.\n\n"
+            "hain (Panel 1 aur Panel 2). Dono ko top-to-bottom order mein seedha suna.\n\n"
             + context_block +
-            "RULES (dono panels ke liye):\n"
-            "1. Har beat = ek visual moment. Dialogue aur uski expression EK HI beat mein "
-            "bata — alag-alag mat todo.\n"
+            "STRICT RULES (dono panels ke liye):\n"
+            "1. Har beat = sirf EK moment — dialogue ya action, dono ek saath.\n"
             "   SAHI: 'Rote hue usne kaha — main tumhe bacha nahi paya...'\n"
-            "   GALAT: 'Usne kaha main tumhe bacha nahi paya.' [alag beat] 'Woh ro raha tha.'\n"
-            "2. Kisi bhi language ke bubbles ka meaning Hindi/Hinglish mein retell karo.\n"
-            "3. Character naam pata ho to lo, warna visual description use karo.\n"
-            "4. BILKUL MAT KARO — apni personal reaction ya commentary ('yaar dil bhar "
-            "aaya', 'kitna dukh hai', 'main toh ro dunga') — yeh double explanation hai.\n"
-            "5. BILKUL MAT KARO — dialogue ke baad alag se explain karna jo already "
-            "dialogue mein clear tha.\n"
-            "6. Generic filler avoid karo ('is panel mein...', 'yahan scene...').\n"
-            "7. Har beat: 1 sentence, max 2 — sirf jo is exact visual moment mein ho raha hai.\n\n"
+            "   GALAT: 'Usne kaha kuch.' [alag beat] 'Woh ro raha tha.'\n"
+            "2. Har beat SIRF 1 sentence — max 15 words. Zyada nahi.\n"
+            "3. Speech bubbles ko Hindi mein naturally retell karo — translate mat karo.\n"
+            "4. Character naam use karo agar panel mein dikh raha ho.\n"
+            "5. FORBIDDEN:\n"
+            "   - Apni reaction: 'waah', 'kya scene hai', 'dil bhar aaya' etc.\n"
+            "   - Dialogue ke baad explanation: 'matlab woh dukhi tha', 'iska matlab...'\n"
+            "   - Filler: 'is panel mein', 'yahan', 'dekho', 'aur phir'\n"
+            "   - Jo panel mein clearly nahi dikh raha\n"
+            "6. Jo bol rahe ho wahi screen pe dikh raha hona chahiye — sync zaroori hai.\n"
+            "7. Beats ki sankhya: sirf actual distinct moments — faaltu beat mat banao.\n\n"
             "SIRF JSON return karo:\n"
             '{"panel_1": {"beats": [{"position": 10, "text": "..."}, ...], '
             '"updated_context": "..."}, '
@@ -768,8 +762,8 @@ class MangaProcessor:
                 else:
                     fallback_dur_ms = int((beat_durations[idx] - self.BEAT_PAUSE) * 1000)
                     combined += AudioSegment.silent(duration=max(500, fallback_dur_ms))
-                if idx < len(beat_audio_paths) - 1:
-                    combined += silence_seg
+                # SYNC FIX: har beat ke baad pause add (timeline match ke liye)
+                combined += silence_seg
 
             if valid_count > 0 and len(combined) > 0:
                 combined_tmp = tempfile.NamedTemporaryFile(
@@ -838,11 +832,33 @@ class MangaProcessor:
             return zoomed[cy:cy + sh, cx:cx + sw]
 
         if not is_tall or scroll_range <= 0:
-            # Horizontal / short panel — center on black background, light ken-burns
-            canvas_base = np.zeros((CANVAS_H, CANVAS_W, 3), dtype=np.uint8)
-            y_off = max(0, (CANVAS_H - panel_h) // 2)
-            y_end = min(CANVAS_H, y_off + panel_h)
-            canvas_base[y_off:y_end, 0:CANVAS_W] = panel_rgb[:y_end - y_off, 0:CANVAS_W]
+            # Horizontal / short panel — blurred bg + centered panel (screenshot 2/3 style)
+            # Original image se blurred bg banana — black bars nahi
+            orig_img = cv2.imread(img_path)
+            if orig_img is not None:
+                oh, ow = orig_img.shape[:2]
+                bg_scale = max(CANVAS_W / ow, CANVAS_H / oh)
+                bg_w = max(1, int(ow * bg_scale))
+                bg_h = max(1, int(oh * bg_scale))
+                bg_res = cv2.resize(orig_img, (bg_w, bg_h))
+                bx = (bg_w - CANVAS_W) // 2
+                by = (bg_h - CANVAS_H) // 2
+                bg_crop = bg_res[by:by + CANVAS_H, bx:bx + CANVAS_W]
+                blur_k = 71
+                bg_blurred = cv2.GaussianBlur(bg_crop, (blur_k, blur_k), 0)
+                bg_blurred = (bg_blurred * 0.45).clip(0, 255).astype(np.uint8)
+                canvas_base = cv2.cvtColor(bg_blurred, cv2.COLOR_BGR2RGB)
+            else:
+                canvas_base = np.zeros((CANVAS_H, CANVAS_W, 3), dtype=np.uint8)
+
+            # Panel ko center mein overlay karo
+            pw = panel_rgb.shape[1]
+            ph = min(panel_h, CANVAS_H)
+            x_off = max(0, (CANVAS_W - pw) // 2)
+            y_off = max(0, (CANVAS_H - ph) // 2)
+            x_end = min(CANVAS_W, x_off + pw)
+            y_end = min(CANVAS_H, y_off + ph)
+            canvas_base[y_off:y_end, x_off:x_end] = panel_rgb[:y_end - y_off, :x_end - x_off]
 
             def make_frame(t):
                 return _ken_burns(canvas_base, t, actual_duration, zoom_max=0.04)
