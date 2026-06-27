@@ -659,58 +659,57 @@ class MangaProcessor:
     # 5. Panel ko CANVAS mein scale karo
     # ─────────────────────────────────────────
     def _load_scaled_panel(self, img_path: str):
+        """
+        Option A — zoom-crop approach:
+        - Horizontal/square panels: scale to fit canvas width, center vertically (unchanged)
+        - Tall vertical panels: scale so WIDTH = CANVAS_W (full bleed)
+          At render time, make_frame crops a CANVAS_H window at the beat's position
+          → viewer sees a zoomed-in, fully readable section, no thin strip
+        Returns: (panel_rgb, is_tall, scaled_h)
+          panel_rgb  — full scaled panel (may be taller than CANVAS_H for tall panels)
+          is_tall    — True if panel height > CANVAS_H after scaling
+          scaled_h   — actual pixel height of panel_rgb
+        """
         img = cv2.imread(img_path)
         if img is None:
             blank = np.zeros((CANVAS_H, CANVAS_W, 3), dtype=np.uint8)
-            return blank, blank, CANVAS_H
+            return blank, False, CANVAS_H
 
         h, w = img.shape[:2]
-        aspect = w / h
+        aspect = w / h  # <1 for tall panels
 
         if aspect >= 1.0:
-            fg_w = CANVAS_W
-            fg_h = max(1, int(CANVAS_W / aspect))
+            # Horizontal/square — fit to canvas width, may have letterbox
+            scale = CANVAS_W / w
+            scaled_w = CANVAS_W
+            scaled_h = max(1, int(h * scale))
+            is_tall = False
         else:
-            # Tall vertical panel — 72% width (pehle 55% tha, panel bahut thin lagti thi)
-            # 72% se panel clearly readable hai + dono side pe thoda blurred bg dikhta hai
-            max_fg_w = int(CANVAS_W * 0.72)
-            h_based_w = max(1, int(CANVAS_H * aspect))
-            if h_based_w <= max_fg_w:
-                fg_w = h_based_w
-                fg_h = CANVAS_H
-            else:
-                fg_w = max_fg_w
-                fg_h = max(1, int(fg_w / aspect))
+            # Tall vertical — scale width to CANVAS_W so it fills full bleed
+            # Height will be >> CANVAS_H; we'll crop per-beat in make_frame
+            scale = CANVAS_W / w
+            scaled_w = CANVAS_W
+            scaled_h = max(1, int(h * scale))
+            is_tall = scaled_h > CANVAS_H
 
-        MAX_PANEL_H = 8000
-        if fg_h > MAX_PANEL_H:
-            scale_down = MAX_PANEL_H / fg_h
-            fg_h = MAX_PANEL_H
-            fg_w = max(1, int(fg_w * scale_down))
+        # Safety cap to avoid OOM on insanely tall panels
+        MAX_PANEL_H = 12000
+        if scaled_h > MAX_PANEL_H:
+            scale_down = MAX_PANEL_H / scaled_h
+            scaled_h = MAX_PANEL_H
+            scaled_w = max(1, int(scaled_w * scale_down))
 
-        fg_resized = cv2.resize(img, (fg_w, fg_h))
-        fg_rgb = cv2.cvtColor(fg_resized, cv2.COLOR_BGR2RGB)
+        panel_resized = cv2.resize(img, (scaled_w, scaled_h))
+        panel_rgb = cv2.cvtColor(panel_resized, cv2.COLOR_BGR2RGB)
 
-        bg_scale = max(CANVAS_W / w, CANVAS_H / h)
-        bg_w = max(1, int(w * bg_scale))
-        bg_h_raw = max(1, int(h * bg_scale))
-        bg_resized = cv2.resize(img, (bg_w, bg_h_raw))
-        cx = (bg_w - CANVAS_W) // 2
-        cy = (bg_h_raw - CANVAS_H) // 2
-        bg_crop = bg_resized[cy:cy + CANVAS_H, cx:cx + CANVAS_W]
-        blur_k = 71
-        bg_blurred = cv2.GaussianBlur(bg_crop, (blur_k, blur_k), 0)
-        bg_blurred = (bg_blurred * 0.40).clip(0, 255).astype(np.uint8)
-        bg_rgb = cv2.cvtColor(bg_blurred, cv2.COLOR_BGR2RGB)
-
-        return fg_rgb, bg_rgb, fg_h
+        return panel_rgb, is_tall, scaled_h
 
     # ─────────────────────────────────────────
     # 6. Panel clip with scroll + audio sync
     # ─────────────────────────────────────────
     async def create_panel_clip(self, img_path: str, beats: list, voice: str = "hi-female"):
-        fg_rgb, bg_rgb, fg_h = self._load_scaled_panel(img_path)
-        scroll_range = max(0, fg_h - CANVAS_H)
+        panel_rgb, is_tall, panel_h = self._load_scaled_panel(img_path)
+        scroll_range = max(0, panel_h - CANVAS_H)
 
         beat_audio_paths = []
         beat_durations = []
@@ -824,20 +823,7 @@ class MangaProcessor:
                 return int(prev_y + (seg["y"] - prev_y) * progress)
             return seg["y"]
 
-        def _composite_frame(fg_crop, bg_frame):
-            frame = bg_frame.copy()
-            fh, fw = fg_crop.shape[:2]
-            x_off = max(0, (CANVAS_W - fw) // 2)
-            x_end = min(CANVAS_W, x_off + fw)
-            y_off = max(0, (CANVAS_H - fh) // 2)
-            y_end = min(CANVAS_H, y_off + fh)
-            fg_h_use = y_end - y_off
-            fg_w_use = x_end - x_off
-            if fg_h_use > 0 and fg_w_use > 0:
-                frame[y_off:y_end, x_off:x_end] = fg_crop[:fg_h_use, :fg_w_use]
-            return frame
-
-        def _ken_burns(source_frame, t, dur, zoom_max=0.05):
+        def _ken_burns(source_frame, t, dur, zoom_max=0.03):
             if dur <= 0:
                 return source_frame
             zoom = 1.0 + zoom_max * (t / dur)
@@ -851,18 +837,27 @@ class MangaProcessor:
             cx = (zw - sw) // 2
             return zoomed[cy:cy + sh, cx:cx + sw]
 
-        if scroll_range <= 0:
+        if not is_tall or scroll_range <= 0:
+            # Horizontal / short panel — center on black background, light ken-burns
+            canvas_base = np.zeros((CANVAS_H, CANVAS_W, 3), dtype=np.uint8)
+            y_off = max(0, (CANVAS_H - panel_h) // 2)
+            y_end = min(CANVAS_H, y_off + panel_h)
+            canvas_base[y_off:y_end, 0:CANVAS_W] = panel_rgb[:y_end - y_off, 0:CANVAS_W]
+
             def make_frame(t):
-                composite = _composite_frame(fg_rgb, bg_rgb)
-                return _ken_burns(composite, t, actual_duration, zoom_max=0.04)
+                return _ken_burns(canvas_base, t, actual_duration, zoom_max=0.04)
         else:
+            # Tall vertical panel — crop a CANVAS_H window at beat position (full bleed)
             def make_frame(t):
                 y = get_y_at_time(t)
                 y = max(0, min(scroll_range, y))
-                fg_slice_h = min(CANVAS_H, fg_rgb.shape[0] - y)
-                fg_slice = fg_rgb[y:y + fg_slice_h, 0:fg_rgb.shape[1]]
-                composite = _composite_frame(fg_slice, bg_rgb)
-                return _ken_burns(composite, t, actual_duration, zoom_max=0.02)
+                # Crop exactly CANVAS_H rows, full CANVAS_W width → fills screen
+                crop = panel_rgb[y:y + CANVAS_H, 0:CANVAS_W]
+                # Pad bottom if crop is short (shouldn't happen but safety)
+                if crop.shape[0] < CANVAS_H:
+                    pad = np.zeros((CANVAS_H - crop.shape[0], CANVAS_W, 3), dtype=np.uint8)
+                    crop = np.vstack([crop, pad])
+                return _ken_burns(crop, t, actual_duration, zoom_max=0.02)
 
         video_clip = VideoClip(make_frame, duration=actual_duration)
         if audio_clip:
