@@ -292,41 +292,36 @@ class MangaProcessor:
             "📖 Yeh PEHLA panel hai is comic ka — koi pichla context nahi hai.\n\n"
         )
 
-        # FIX #6: Improved prompt — quality first, concise bhi but NOT at the cost of engagement
+        # Prompt: clean narrator, no double explanation, no personal reactions
         prompt = (
-            "Tu ek POPULAR YouTube manga/comic EXPLAINER hai jaise 'Anime Senpai' ya "
-            "'Hindi Dubbed Reviews' channel — seedha camera ke saamne baithkar apne "
-            "viewers ko REAL MEIN yeh kahani suna raha hai. Teri awaaz mein ENERGY aur "
-            "INVESTMENT dikhni chahiye.\n\n"
+            "Tu ek YouTube manga Hindi narrator hai. Seedha kahani suna — "
+            "jaise koi dost excited hokar story bata raha ho.\n\n"
             + context_block +
-            "Ab is NAYE panel ko dhyaan se dekh:\n\n"
+            "Is panel ko TOP se BOTTOM tak dekh aur beats mein bata:\n\n"
             "RULES:\n"
-            "1. Speech bubbles/captions/sound-effects ka text padh — KISI BHI language "
-            "mein ho (English, Italian, Japanese, Korean) — uska FULL MEANING Hindi/"
-            "Hinglish mein apne natural words mein bata. Translate mat kar — RETELL kar.\n"
-            "2. Character ka NAAM pata chal jaaye to naam se refer kar. Naam nahi pata "
-            "to visual description use kar ('woh tall vampire ladke ne').\n"
-            "3. Sirf dialogue nahi — facial expression, body language, scene tension bhi "
-            "describe kar ('Nancy ki aankhon mein darr saaf dikh raha tha jab usne kaha...').\n"
-            "4. REAL narrator ki tarah bol:\n"
-            "   - Viewer se engage karo jab scene big ho ('Bhai yahan dekho kya hota hai!')\n"
-            "   - Apni reaction daalo jab dramatic moment ho ('Aur yeh sunke mera toh dil "
-            "hi thham gaya yaar')\n"
-            "   - Rhetorical sawaal daalo suspense pe ('Ab yeh karega kya? Kya woh jaanta "
-            "hai sach?')\n"
-            "   - Panels ke beech natural flow rakho — pichla panel khatam, yeh shuru\n"
-            "5. AVOID karo:\n"
-            "   - Generic filler jaise 'is panel mein...', 'yahan scene hai ki...'\n"
-            "   - Mere dialogue translation bina context ke\n"
-            "   - Repetition — jo bata diya woh dobara mat bolo\n"
-            "6. BEAT LENGTH: Har beat 1-2 sentences — zyada bhi nahi, bohot chhota bhi "
-            "nahi. Ek beat mein ek complete thought honi chahiye (action + reaction, ya "
-            "dialogue + expression).\n\n"
-            "Panel ko TOP se BOTTOM tak 'beats' mein todo — har beat ek visual section.\n"
-            "Har beat ka 'position' do (0=top, 100=bottom).\n\n"
+            "1. Har beat = ek visual scene ya dialogue moment. Jo panel mein "
+            "dikh raha hai wahi bata — dialogue + expression ek saath.\n"
+            "   SAHI: 'Rote hue usne kaha — main tumhe bacha nahi paya...'\n"
+            "   GALAT: 'Usne kaha main tumhe bacha nahi paya. [alag beat] Woh ro raha tha.'\n"
+            "2. Dialogue aur uski expression/action EK HI beat mein honi chahiye — "
+            "alag-alag mat todo.\n"
+            "3. Kisi bhi language ke speech bubbles ka meaning Hindi/Hinglish mein "
+            "naturally retell karo — word-by-word translation nahi.\n"
+            "4. Character naam pata ho to naam lo, warna visual description ('woh ladki', "
+            "'tall aadmi').\n"
+            "5. BILKUL MAT KARO:\n"
+            "   - Apni personal reaction ya commentary ('yaar mera dil bhar aaya', "
+            "'kitna dukh hai', 'main toh ro dunga') — yeh extra hai, viewer ko lagta "
+            "hai narrator zyada bol raha hai\n"
+            "   - Dialogue ke baad alag se explain karna ('matlab woh bahut dukhi tha') — "
+            "expression already dialogue ke saath aa gayi to dobara mat bolo\n"
+            "   - Generic filler ('is panel mein...', 'yahan scene hai ki...')\n"
+            "   - Koi bhi cheez jo panel mein dikh nahi rahi\n"
+            "6. Beat length: 1 sentence, max 2 — sirf wahi jo is exact visual moment mein "
+            "ho raha hai.\n\n"
             "SIRF JSON return karo:\n"
             '{"beats": [{"position": 10, "text": "..."}, {"position": 70, "text": "..."}], '
-            '"updated_context": "2-3 sentence summary: characters, key events, current tension"}'
+            '"updated_context": "2-3 sentence summary of story so far"}'
         )
 
         content_parts = [
@@ -475,16 +470,22 @@ class MangaProcessor:
         )
 
         batch_prompt = (
-            "Tu ek POPULAR YouTube manga explainer hai. Tujhe 2 manga panels diye ja rahe "
-            "hain (Panel 1 aur Panel 2). Dono ko top-to-bottom order mein explain kar.\n\n"
+            "Tu ek YouTube manga Hindi narrator hai. Tujhe 2 manga panels diye ja rahe "
+            "hain (Panel 1 aur Panel 2). Dono ko top-to-bottom order mein suna.\n\n"
             + context_block +
             "RULES (dono panels ke liye):\n"
-            "1. Har language ke speech bubbles ka meaning Hindi/Hinglish mein naturally retell karo.\n"
-            "2. Character naam pata ho to naam use karo.\n"
-            "3. Dialogue ke saath expression, mood, body language bhi describe karo.\n"
-            "4. Real narrator ki tarah bol — viewer ko engage rakho, apni reaction daalo.\n"
-            "5. Har beat 1-2 sentences — complete thought with action + reaction.\n"
-            "6. Generic filler lines AVOID karo — every beat mein actual content hona chahiye.\n\n"
+            "1. Har beat = ek visual moment. Dialogue aur uski expression EK HI beat mein "
+            "bata — alag-alag mat todo.\n"
+            "   SAHI: 'Rote hue usne kaha — main tumhe bacha nahi paya...'\n"
+            "   GALAT: 'Usne kaha main tumhe bacha nahi paya.' [alag beat] 'Woh ro raha tha.'\n"
+            "2. Kisi bhi language ke bubbles ka meaning Hindi/Hinglish mein retell karo.\n"
+            "3. Character naam pata ho to lo, warna visual description use karo.\n"
+            "4. BILKUL MAT KARO — apni personal reaction ya commentary ('yaar dil bhar "
+            "aaya', 'kitna dukh hai', 'main toh ro dunga') — yeh double explanation hai.\n"
+            "5. BILKUL MAT KARO — dialogue ke baad alag se explain karna jo already "
+            "dialogue mein clear tha.\n"
+            "6. Generic filler avoid karo ('is panel mein...', 'yahan scene...').\n"
+            "7. Har beat: 1 sentence, max 2 — sirf jo is exact visual moment mein ho raha hai.\n\n"
             "SIRF JSON return karo:\n"
             '{"panel_1": {"beats": [{"position": 10, "text": "..."}, ...], '
             '"updated_context": "..."}, '
@@ -670,7 +671,9 @@ class MangaProcessor:
             fg_w = CANVAS_W
             fg_h = max(1, int(CANVAS_W / aspect))
         else:
-            max_fg_w = int(CANVAS_W * 0.55)
+            # Tall vertical panel — 72% width (pehle 55% tha, panel bahut thin lagti thi)
+            # 72% se panel clearly readable hai + dono side pe thoda blurred bg dikhta hai
+            max_fg_w = int(CANVAS_W * 0.72)
             h_based_w = max(1, int(CANVAS_H * aspect))
             if h_based_w <= max_fg_w:
                 fg_w = h_based_w
