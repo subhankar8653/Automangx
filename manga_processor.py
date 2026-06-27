@@ -292,7 +292,7 @@ class MangaProcessor:
             "📖 Yeh PEHLA panel hai is comic ka — koi pichla context nahi hai.\n\n"
         )
 
-        # Prompt: short beats, strict sync, no extra narration
+        # Prompt: short beats, strict sync, smart pan direction
         prompt = (
             "Tu ek YouTube manga Hindi narrator hai. Seedha aur fast bata — "
             "jaise koi dost 30 second mein poori scene explain kare.\n\n"
@@ -312,8 +312,15 @@ class MangaProcessor:
             "   - Koi bhi cheez jo panel mein clearly nahi dikh rahi\n"
             "6. Jo bol rahe ho wahi screen pe dikh raha hona chahiye — sync zaroori hai.\n"
             "7. Beats ki sankhya: jo scene mein distinct moments hain utne — faaltu beat mat banao.\n\n"
+            "8. Har beat ke liye \"pan\" field bhi do:\n"
+            "   - \"top_to_bottom\": is beat mein camera upar se niche move kare (e.g. pehle face dikha, phir body)\n"
+            "   - \"bottom_to_top\": camera niche se upar move kare (e.g. pehle feet, phir face)\n"
+            "   - \"static\": camera ek jagah ruke (jab poora scene ek hi area mein ho)\n"
+            "   position = is beat ka center point (0=top, 100=bottom). "
+            "pan direction = crop window us center ke around kaise move kare.\n\n"
             "SIRF JSON return karo:\n"
-            '{"beats": [{"position": 10, "text": "..."}, {"position": 70, "text": "..."}], '
+            '{"beats": [{"position": 10, "pan": "top_to_bottom", "text": "..."}, '
+            '{"position": 70, "pan": "static", "text": "..."}], '
             '"updated_context": "2-3 sentence summary of story so far"}'
         )
 
@@ -390,7 +397,10 @@ class MangaProcessor:
                         pos = max(0, min(100, float(pos)))
                     except (TypeError, ValueError):
                         pos = 50
-                    beats.append({"text": txt, "position": pos})
+                    pan = (item.get("pan") or "static").strip().lower()
+                    if pan not in ("top_to_bottom", "bottom_to_top", "static"):
+                        pan = "static"
+                    beats.append({"text": txt, "position": pos, "pan": pan})
 
                 if not beats:
                     raise ValueError("Saare beats empty nikle")
@@ -479,11 +489,15 @@ class MangaProcessor:
             "   - Filler: 'is panel mein', 'yahan', 'dekho', 'aur phir'\n"
             "   - Jo panel mein clearly nahi dikh raha\n"
             "6. Jo bol rahe ho wahi screen pe dikh raha hona chahiye — sync zaroori hai.\n"
-            "7. Beats ki sankhya: sirf actual distinct moments — faaltu beat mat banao.\n\n"
+            "7. Beats ki sankhya: sirf actual distinct moments — faaltu beat mat banao.\n"
+            "8. Har beat ke liye \"pan\" field bhi do:\n"
+            "   - \"top_to_bottom\": camera upar se niche (e.g. face → body)\n"
+            "   - \"bottom_to_top\": camera niche se upar (e.g. feet → face)\n"
+            "   - \"static\": ek jagah ruko\n\n"
             "SIRF JSON return karo:\n"
-            '{"panel_1": {"beats": [{"position": 10, "text": "..."}, ...], '
+            '{"panel_1": {"beats": [{"position": 10, "pan": "top_to_bottom", "text": "..."}, ...], '
             '"updated_context": "..."}, '
-            '"panel_2": {"beats": [{"position": 20, "text": "..."}, ...], '
+            '"panel_2": {"beats": [{"position": 20, "pan": "static", "text": "..."}, ...], '
             '"updated_context": "..."}}'
         )
 
@@ -564,7 +578,10 @@ class MangaProcessor:
                             pos = max(0, min(100, float(pos)))
                         except (TypeError, ValueError):
                             pos = 50
-                        beats.append({"text": txt, "position": pos})
+                        pan = (item.get("pan") or "static").strip().lower()
+                        if pan not in ("top_to_bottom", "bottom_to_top", "static"):
+                            pan = "static"
+                        beats.append({"text": txt, "position": pos, "pan": pan})
                     if not beats:
                         beats = self._make_fallback_beats()
                     beats.sort(key=lambda b: b["position"])
@@ -801,10 +818,12 @@ class MangaProcessor:
         t_cursor = 0.0
         for beat, dur in zip(beats, real_durations):
             y_target = int((beat["position"] / 100.0) * scroll_range)
+            pan = beat.get("pan", "static")
             timeline.append({
                 "start": t_cursor,
                 "end": t_cursor + dur,
                 "y": y_target,
+                "pan": pan,
             })
             t_cursor += dur
 
@@ -815,25 +834,55 @@ class MangaProcessor:
         def get_y_at_time(t):
             if scroll_range <= 0 or not timeline:
                 return 0
-            # Find which beat is currently playing
+
+            # Find active beat
             active_idx = len(timeline) - 1
             for i, seg in enumerate(timeline):
                 if t < seg["end"]:
                     active_idx = i
                     break
+
             seg = timeline[active_idx]
-            # Smooth scroll: first 20% of beat duration transition karo prev position se
-            TRANSITION_FRAC = 0.20
-            transition_time = min(0.3, (seg["end"] - seg["start"]) * TRANSITION_FRAC)
-            if active_idx > 0 and transition_time > 0:
-                time_into_seg = t - seg["start"]
-                if time_into_seg < transition_time:
-                    prev_y = timeline[active_idx - 1]["y"]
-                    progress = time_into_seg / transition_time
-                    # Ease-out cubic
-                    progress = 1 - (1 - progress) ** 3
-                    return int(prev_y + (seg["y"] - prev_y) * progress)
-            return seg["y"]
+            seg_start = seg["start"]
+            seg_end = seg["end"]
+            seg_dur = max(0.01, seg_end - seg_start)
+            center_y = seg["y"]
+            pan = seg.get("pan", "static")
+
+            # Beat ke andar pan motion: center_y ke aas paas ±pan_range pixels
+            # Pan range = CANVAS_H ka 30% (yaani crop window apne center se itna upar/niche jayegi)
+            PAN_RANGE = int(CANVAS_H * 0.30)
+
+            # Transition: beats ke beech smooth jump (first 15% of beat)
+            TRANSITION_FRAC = 0.15
+            transition_time = min(0.25, seg_dur * TRANSITION_FRAC)
+            time_into_seg = t - seg_start
+
+            # Base y: transition from prev beat center to this beat center
+            if active_idx > 0 and transition_time > 0 and time_into_seg < transition_time:
+                prev_y = timeline[active_idx - 1]["y"]
+                progress = time_into_seg / transition_time
+                progress = 1 - (1 - progress) ** 3  # ease-out cubic
+                base_y = prev_y + (center_y - prev_y) * progress
+            else:
+                base_y = float(center_y)
+
+            # Pan offset within this beat (after transition)
+            pan_progress = max(0.0, (time_into_seg - transition_time) / max(0.01, seg_dur - transition_time))
+            pan_progress = min(1.0, pan_progress)
+
+            if pan == "top_to_bottom":
+                # Upar se shuru, niche tak jaao
+                pan_offset = -PAN_RANGE + (2 * PAN_RANGE * pan_progress)
+            elif pan == "bottom_to_top":
+                # Niche se shuru, upar tak jaao
+                pan_offset = PAN_RANGE - (2 * PAN_RANGE * pan_progress)
+            else:
+                # static — center pe raho
+                pan_offset = 0
+
+            final_y = int(base_y + pan_offset)
+            return max(0, min(scroll_range, final_y))
 
         def _ken_burns(source_frame, t, dur, zoom_max=0.03):
             if dur <= 0:
@@ -924,6 +973,8 @@ class MangaProcessor:
             x_start = (CANVAS_W - actual_panel_w) // 2
             x_end_paste = x_start + actual_panel_w
 
+            # Override scroll_range for tall panel (get_y_at_time uses outer scroll_range)
+            # We re-clamp here to scroll_range_display
             def make_frame(t):
                 y2 = get_y_at_time(t)
                 y2 = max(0, min(scroll_range_display, y2))
