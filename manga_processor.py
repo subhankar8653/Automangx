@@ -16,8 +16,7 @@ from google.genai import types
 from gtts import gTTS
 from moviepy.editor import (
     ImageClip, AudioClip, AudioFileClip, concatenate_videoclips, concatenate_audioclips,
-    CompositeAudioClip, CompositeVideoClip, VideoClip, VideoFileClip, afx,
-    AudioArrayClip  # FIX #1: missing import added
+    CompositeAudioClip, CompositeVideoClip, VideoClip, VideoFileClip, afx
 )
 from pdf2image import convert_from_path
 
@@ -927,9 +926,12 @@ class MangaProcessor:
 
         video = VideoClip(make_intro_frame, duration=duration)
 
-        # FIX #1: AudioArrayClip — ab crash nahi hoga (import upar se aata hai)
-        silent_arr = np.zeros((int(44100 * duration), 2), dtype=np.float32)
-        silent_audio = AudioArrayClip(silent_arr, fps=44100).set_duration(duration)
+        # moviepy 1.0.3 mein AudioArrayClip nahi hai — AudioClip lambda use karo
+        silent_audio = AudioClip(
+            lambda t: np.zeros((1, 2)) if np.isscalar(t) else np.zeros((len(t), 2)),
+            duration=duration,
+            fps=44100
+        )
         return video.set_audio(silent_audio)
 
     # ─────────────────────────────────────────
