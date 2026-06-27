@@ -728,24 +728,16 @@ class MangaProcessor:
             beat_audio_paths.append(audio_path)
             beat_durations.append(dur)
 
-        total_duration = sum(beat_durations)
-        if total_duration <= 0:
-            total_duration = 1.5
-
-        timeline = []
-        t_cursor = 0.0
-        for beat, dur in zip(beats, beat_durations):
-            y_target = int((beat["position"] / 100.0) * scroll_range)
-            timeline.append({
-                "start": t_cursor,
-                "end": t_cursor + dur,
-                "y": y_target,
-            })
-            t_cursor += dur
-
+        # SYNC FIX: Pehle audio combine karo, real durations measure karo,
+        # phir timeline banao — estimated durations pe nahi, actual pe
         combined_audio_path = None
         audio_clip = None
-        actual_duration = total_duration
+        actual_duration = sum(beat_durations)
+        if actual_duration <= 0:
+            actual_duration = 1.5
+
+        # Real measured durations for timeline (pydub se accurate ms)
+        real_durations = []
 
         try:
             from pydub import AudioSegment
@@ -757,13 +749,17 @@ class MangaProcessor:
             for idx, p in enumerate(beat_audio_paths):
                 if os.path.exists(p) and os.path.getsize(p) > 0:
                     seg = AudioSegment.from_file(p)
+                    seg_dur_s = len(seg) / 1000.0
                     combined += seg
+                    combined += silence_seg
+                    real_durations.append(seg_dur_s + self.BEAT_PAUSE)
                     valid_count += 1
                 else:
                     fallback_dur_ms = int((beat_durations[idx] - self.BEAT_PAUSE) * 1000)
-                    combined += AudioSegment.silent(duration=max(500, fallback_dur_ms))
-                # SYNC FIX: har beat ke baad pause add (timeline match ke liye)
-                combined += silence_seg
+                    fallback_seg = AudioSegment.silent(duration=max(500, fallback_dur_ms))
+                    combined += fallback_seg
+                    combined += silence_seg
+                    real_durations.append((max(500, fallback_dur_ms) / 1000.0) + self.BEAT_PAUSE)
 
             if valid_count > 0 and len(combined) > 0:
                 combined_tmp = tempfile.NamedTemporaryFile(
@@ -777,9 +773,11 @@ class MangaProcessor:
                 logger.info(f"Audio: {actual_duration:.2f}s, {valid_count} beats")
             else:
                 logger.warning("Koi valid beat audio nahi")
+                real_durations = beat_durations
 
         except Exception as e:
             logger.warning(f"pydub error: {e} — moviepy fallback")
+            real_durations = beat_durations
             try:
                 valid_audio_clips = []
                 for idx, p in enumerate(beat_audio_paths):
@@ -795,26 +793,46 @@ class MangaProcessor:
                 logger.warning(f"Moviepy fallback bhi fail: {e2}")
                 audio_clip = None
 
+        # Timeline: real measured durations pe banao
+        if not real_durations:
+            real_durations = beat_durations
+
+        timeline = []
+        t_cursor = 0.0
+        for beat, dur in zip(beats, real_durations):
+            y_target = int((beat["position"] / 100.0) * scroll_range)
+            timeline.append({
+                "start": t_cursor,
+                "end": t_cursor + dur,
+                "y": y_target,
+            })
+            t_cursor += dur
+
+        # Last beat actual audio end tak extend karo
         if timeline:
             timeline[-1]["end"] = actual_duration
 
         def get_y_at_time(t):
             if scroll_range <= 0 or not timeline:
                 return 0
+            # Find which beat is currently playing
             active_idx = len(timeline) - 1
             for i, seg in enumerate(timeline):
-                if t <= seg["end"]:
+                if t < seg["end"]:
                     active_idx = i
                     break
             seg = timeline[active_idx]
-            seg_dur = seg["end"] - seg["start"]
-            transition_time = min(0.4, seg_dur * 0.3) if seg_dur > 0 else 0
-            if active_idx > 0 and transition_time > 0 and t < seg["start"] + transition_time:
-                prev_y = timeline[active_idx - 1]["y"]
-                progress = (t - seg["start"]) / transition_time
-                progress = max(0.0, min(1.0, progress))
-                progress = 1 - (1 - progress) ** 3
-                return int(prev_y + (seg["y"] - prev_y) * progress)
+            # Smooth scroll: first 20% of beat duration transition karo prev position se
+            TRANSITION_FRAC = 0.20
+            transition_time = min(0.3, (seg["end"] - seg["start"]) * TRANSITION_FRAC)
+            if active_idx > 0 and transition_time > 0:
+                time_into_seg = t - seg["start"]
+                if time_into_seg < transition_time:
+                    prev_y = timeline[active_idx - 1]["y"]
+                    progress = time_into_seg / transition_time
+                    # Ease-out cubic
+                    progress = 1 - (1 - progress) ** 3
+                    return int(prev_y + (seg["y"] - prev_y) * progress)
             return seg["y"]
 
         def _ken_burns(source_frame, t, dur, zoom_max=0.03):
