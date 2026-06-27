@@ -99,7 +99,6 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     await query.answer()
 
-    # ── Back to main settings menu ──
     if data == "back_settings":
         s = await get_user_settings(user_id)
         await query.edit_message_text(
@@ -108,7 +107,6 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ── Reset ──
     if data == "reset_settings":
         await reset_user_settings(user_id)
         s = await get_user_settings(user_id)
@@ -119,7 +117,6 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ── Quality submenu ──
     if data == "menu_quality":
         buttons = [[InlineKeyboardButton(q, callback_data=f"set_quality_{q}")]
                    for q in QUALITY_OPTIONS.keys()]
@@ -141,7 +138,6 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ── Voice submenu ──
     if data == "menu_voice":
         buttons = [[InlineKeyboardButton(v['label'], callback_data=f"set_voice_{key}")]
                    for key, v in VOICE_OPTIONS.items()]
@@ -166,7 +162,6 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ── BGM submenu ──
     if data == "menu_bgm":
         buttons = [
             [InlineKeyboardButton("🔇 OFF", callback_data="set_bgm_off")],
@@ -197,7 +192,6 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ── Panel Text (text removal) submenu ──
     if data == "menu_text_removal":
         buttons = [
             [InlineKeyboardButton("📝 Keep Text (original bubbles)", callback_data="set_textrm_off")],
@@ -206,8 +200,7 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         await query.edit_message_text(
             "📝 *Panel text ka kya karna hai?*\n\n"
-            "_Keep_ — speech bubbles waisi hi dikhengi panel mein (jaisi original "
-            "manga mein hain)\n"
+            "_Keep_ — speech bubbles waisi hi dikhengi panel mein\n"
             "_Remove_ — OpenCV se text/bubble clean karke hata diya jayega",
             parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup(buttons)
@@ -227,7 +220,7 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ═════════════════════════════════════════
-# File handlers (image / pdf / zip)
+# File handlers
 # ═════════════════════════════════════════
 
 async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -257,7 +250,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp:
             await file.download_to_drive(tmp.name)
             pdf_path = tmp.name
-        await process_and_send(update, context, pdf_path=pdf_path)
+
+        # FIX #2: File name from document as story title
+        story_title = (doc.file_name or "Manga Story").replace(".pdf", "").replace("_", " ").strip()
+        await process_and_send(update, context, pdf_path=pdf_path, story_title=story_title)
 
     elif fname.endswith('.zip') or doc.mime_type in (
             'application/zip', 'application/x-zip-compressed'):
@@ -266,7 +262,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as tmp:
             await file.download_to_drive(tmp.name)
             zip_path = tmp.name
-        await process_and_send(update, context, zip_path=zip_path)
+
+        # FIX #2: ZIP filename as story title
+        story_title = (doc.file_name or "Manga Story").replace(".zip", "").replace("_", " ").strip()
+        await process_and_send(update, context, zip_path=zip_path, story_title=story_title)
 
     elif doc.mime_type in ('image/jpeg', 'image/png') or fname.endswith(('.jpg', '.jpeg', '.png')):
         file = await context.bot.get_file(doc.file_id)
@@ -298,10 +297,12 @@ async def process_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ═════════════════════════════════════════
 # Core processing pipeline
+# FIX #2: story_title parameter added throughout
 # ═════════════════════════════════════════
 
 async def process_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE,
-                            image_paths=None, pdf_path=None, zip_path=None):
+                            image_paths=None, pdf_path=None, zip_path=None,
+                            story_title: str = "Manga Story"):  # FIX #2
     user_id = update.effective_user.id
     settings = await get_user_settings(user_id)
 
@@ -312,11 +313,6 @@ async def process_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE,
     )
 
     try:
-        # Step 1: Get images (from PDF, ZIP, or direct uploads)
-        # NOTE: pdf_to_images/zip_to_images CPU-bound blocking calls hain
-        # (cv2, pdf2image) — run_in_executor mein chalate hain taaki bot ka
-        # event loop block na ho aur Telegram ko response milte rahe
-        # (warna bot "stuck" dikhta hai aur Railway timeout/restart kar deta hai)
         loop = asyncio.get_event_loop()
         if pdf_path:
             await status_msg.edit_text(
@@ -337,19 +333,13 @@ async def process_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 None, processor.zip_to_images, zip_path
             )
 
-        # Step 1b: Blank/text-only panels filter karo (jaise sirf-bubble
-        # wale recap panels, koi actual artwork nahi) — yeh extraction ke
-        # turant baad karte hain taaki aage Gemini script-generation aur
-        # video-rendering steps mein bhi yeh panels skip ho jaayein
-        # (Gemini quota bhi bachta hai aise panels pe waste hone se)
         if image_paths:
             (image_paths,) = await loop.run_in_executor(
                 None, processor.filter_blank_panels, image_paths
             )
             if not image_paths:
-                raise ValueError("Saare panels blank/text-only nikle — koi actual artwork nahi mila!")
+                raise ValueError("Saare panels blank nikle — koi actual artwork nahi mila!")
 
-        # Step 2: Remove text from panels (settings ke hisaab se — optional)
         if settings.get('text_removal'):
             await status_msg.edit_text(
                 "🎬 *Video ban rahi hai...*\n\n"
@@ -363,8 +353,6 @@ async def process_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE,
         else:
             cleaned_images = list(image_paths)
 
-        # Step 3: Har panel ke liye explainer-script (dialogue + expression
-        # + scene) generate karo, position-tagged beats ke saath
         await status_msg.edit_text(
             "🎬 *Video ban rahi hai...*\n\n"
             "✅ Step 1/4: Images ready!\n"
@@ -375,14 +363,7 @@ async def process_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE,
         )
         panel_beats = []
         story_context = ""
-        # IMPORTANT: script hamesha ORIGINAL image (image_paths) se generate
-        # hota hai, kyunki agar text_removal ON hai to cleaned_images mein
-        # dialogue mit chuka hota hai — Gemini ko dialogue padhne ke liye
-        # original text-wali image chahiye. cleaned_images sirf VIDEO mein
-        # dikhane ke liye use hoti hai.
-        #
-        # BATCH MODE: 2 panels ek Gemini call mein — calls aadhi ho jaati
-        # hain, free-tier (10 RPM) par kaafi faster processing hoti hai.
+
         i = 0
         while i < len(image_paths):
             batch_paths = image_paths[i:i + 2]
@@ -403,9 +384,8 @@ async def process_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE,
                         parse_mode='Markdown'
                     )
                 except Exception:
-                    pass  # rate-limit pe edit fail ho sakta hai, ignore karo
+                    pass
 
-        # Step 4: Scroll-synced video banao (voice + BGM)
         await status_msg.edit_text(
             "🎬 *Video ban rahi hai...*\n\n"
             "✅ Step 1/4: Images ready!\n"
@@ -417,8 +397,6 @@ async def process_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE,
         )
 
         async def _video_progress(done: int, total: int):
-            # done == -1 is a special signal: all panels rendered,
-            # final ffmpeg merge/BGM mix chal rahi hai
             if done == -1:
                 try:
                     await status_msg.edit_text(
@@ -433,7 +411,6 @@ async def process_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 except Exception:
                     pass
                 return
-            # Har 2 panels ya last panel par update karo
             if done % 2 == 0 or done == total:
                 try:
                     await status_msg.edit_text(
@@ -445,7 +422,7 @@ async def process_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE,
                         parse_mode='Markdown'
                     )
                 except Exception:
-                    pass  # rate-limit pe edit fail ho sakta hai, ignore karo
+                    pass
 
         quality_height = QUALITY_OPTIONS.get(settings['quality'], 720)
         video_path = await processor.create_video_from_panels(
@@ -454,23 +431,26 @@ async def process_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE,
             voice=settings['voice'],
             bgm_enabled=settings['bgm_enabled'],
             bgm_volume=settings['bgm_volume'],
+            story_title=story_title,          # FIX #2: ab pass ho raha hai
             progress_callback=_video_progress,
         )
 
-        # Send video
         await status_msg.edit_text("✅ *Video taiyar hai! Bhej raha hoon...* 🎉", parse_mode='Markdown')
 
         with open(video_path, 'rb') as video_file:
             await update.message.reply_video(
                 video=video_file,
-                caption="🎌 *Tumhari Manga Explainer Video!*\n\nKaisi lagi? Aur bhejo! 🔥\n\n⚙️ /settings se style change karo",
+                caption=(
+                    f"🎌 *{story_title}*\n\n"
+                    "Hindi Manga Explainer Video 🔥\n\n"
+                    "⚙️ /settings se style change karo"
+                ),
                 parse_mode='Markdown',
                 supports_streaming=True
             )
 
         await status_msg.delete()
 
-        # Cleanup
         processor.cleanup(image_paths, cleaned_images,
                            video_path, pdf_path, zip_path)
 
