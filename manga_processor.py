@@ -272,7 +272,7 @@ class MangaProcessor:
     # ─────────────────────────────────────────
     def _make_fallback_beats(self) -> list:
         return [
-            {"text": "Yeh panel abhi load nahi ho paya, aage badhte hain.", "position": 50},
+            {"text": "Yeh panel abhi load nahi ho paya, aage badhte hain."},
         ]
 
     async def generate_panel_script(self, image_path: str, story_context: str = "") -> tuple:
@@ -292,7 +292,7 @@ class MangaProcessor:
             "📖 Yeh PEHLA panel hai is comic ka — koi pichla context nahi hai.\n\n"
         )
 
-        # Prompt: short beats, strict sync, smart pan direction
+        # Prompt: panel TOP se BOTTOM tak continuous scroll — beats sirf narration ke liye
         prompt = (
             "Tu ek YouTube manga Hindi narrator hai. Seedha aur fast bata — "
             "jaise koi dost 30 second mein poori scene explain kare.\n\n"
@@ -310,17 +310,10 @@ class MangaProcessor:
             "   - Dialogue ke baad explanation: 'matlab woh dukhi tha', 'iska matlab...'\n"
             "   - Filler: 'is panel mein', 'yahan', 'dekho', 'aur phir'\n"
             "   - Koi bhi cheez jo panel mein clearly nahi dikh rahi\n"
-            "6. Jo bol rahe ho wahi screen pe dikh raha hona chahiye — sync zaroori hai.\n"
+            "6. Panel TOP se BOTTOM tak continuously scroll hoga — beats usi order mein likho.\n"
             "7. Beats ki sankhya: jo scene mein distinct moments hain utne — faaltu beat mat banao.\n\n"
-            "8. Har beat ke liye \"pan\" field bhi do:\n"
-            "   - \"top_to_bottom\": is beat mein camera upar se niche move kare (e.g. pehle face dikha, phir body)\n"
-            "   - \"bottom_to_top\": camera niche se upar move kare (e.g. pehle feet, phir face)\n"
-            "   - \"static\": camera ek jagah ruke (jab poora scene ek hi area mein ho)\n"
-            "   position = is beat ka center point (0=top, 100=bottom). "
-            "pan direction = crop window us center ke around kaise move kare.\n\n"
             "SIRF JSON return karo:\n"
-            '{"beats": [{"position": 10, "pan": "top_to_bottom", "text": "..."}, '
-            '{"position": 70, "pan": "static", "text": "..."}], '
+            '{"beats": [{"text": "..."}, {"text": "..."}], '
             '"updated_context": "2-3 sentence summary of story so far"}'
         )
 
@@ -392,20 +385,10 @@ class MangaProcessor:
                     txt = (item.get("text") or "").strip()
                     if not txt:
                         continue
-                    pos = item.get("position", 50)
-                    try:
-                        pos = max(0, min(100, float(pos)))
-                    except (TypeError, ValueError):
-                        pos = 50
-                    pan = (item.get("pan") or "static").strip().lower()
-                    if pan not in ("top_to_bottom", "bottom_to_top", "static"):
-                        pan = "static"
-                    beats.append({"text": txt, "position": pos, "pan": pan})
+                    beats.append({"text": txt})
 
                 if not beats:
                     raise ValueError("Saare beats empty nikle")
-
-                beats.sort(key=lambda b: b["position"])
 
                 if not new_context:
                     new_context = story_context
@@ -488,16 +471,12 @@ class MangaProcessor:
             "   - Dialogue ke baad explanation: 'matlab woh dukhi tha', 'iska matlab...'\n"
             "   - Filler: 'is panel mein', 'yahan', 'dekho', 'aur phir'\n"
             "   - Jo panel mein clearly nahi dikh raha\n"
-            "6. Jo bol rahe ho wahi screen pe dikh raha hona chahiye — sync zaroori hai.\n"
-            "7. Beats ki sankhya: sirf actual distinct moments — faaltu beat mat banao.\n"
-            "8. Har beat ke liye \"pan\" field bhi do:\n"
-            "   - \"top_to_bottom\": camera upar se niche (e.g. face → body)\n"
-            "   - \"bottom_to_top\": camera niche se upar (e.g. feet → face)\n"
-            "   - \"static\": ek jagah ruko\n\n"
+            "6. Panel TOP se BOTTOM tak continuously scroll hoga — beats usi order mein likho.\n"
+            "7. Beats ki sankhya: sirf actual distinct moments — faaltu beat mat banao.\n\n"
             "SIRF JSON return karo:\n"
-            '{"panel_1": {"beats": [{"position": 10, "pan": "top_to_bottom", "text": "..."}, ...], '
+            '{"panel_1": {"beats": [{"text": "..."}, ...], '
             '"updated_context": "..."}, '
-            '"panel_2": {"beats": [{"position": 20, "pan": "static", "text": "..."}, ...], '
+            '"panel_2": {"beats": [{"text": "..."}, ...], '
             '"updated_context": "..."}}'
         )
 
@@ -573,18 +552,9 @@ class MangaProcessor:
                         txt = (item.get("text") or "").strip()
                         if not txt:
                             continue
-                        pos = item.get("position", 50)
-                        try:
-                            pos = max(0, min(100, float(pos)))
-                        except (TypeError, ValueError):
-                            pos = 50
-                        pan = (item.get("pan") or "static").strip().lower()
-                        if pan not in ("top_to_bottom", "bottom_to_top", "static"):
-                            pan = "static"
-                        beats.append({"text": txt, "position": pos, "pan": pan})
+                        beats.append({"text": txt})
                     if not beats:
                         beats = self._make_fallback_beats()
-                    beats.sort(key=lambda b: b["position"])
                     all_beats.append(beats)
                     new_ctx = (pdata.get("updated_context") or "").strip()
                     if new_ctx:
@@ -745,8 +715,7 @@ class MangaProcessor:
             beat_audio_paths.append(audio_path)
             beat_durations.append(dur)
 
-        # SYNC FIX: Pehle audio combine karo, real durations measure karo,
-        # phir timeline banao — estimated durations pe nahi, actual pe
+        # Audio combine karo — actual_duration measure karna zaroori hai scroll speed ke liye
         combined_audio_path = None
         audio_clip = None
         actual_duration = sum(beat_durations)
@@ -810,82 +779,14 @@ class MangaProcessor:
                 logger.warning(f"Moviepy fallback bhi fail: {e2}")
                 audio_clip = None
 
-        # Timeline: real measured durations pe banao
-        if not real_durations:
-            real_durations = beat_durations
-
-        timeline = []
-        t_cursor = 0.0
-        for beat, dur in zip(beats, real_durations):
-            y_target = int((beat["position"] / 100.0) * scroll_range)
-            pan = beat.get("pan", "static")
-            timeline.append({
-                "start": t_cursor,
-                "end": t_cursor + dur,
-                "y": y_target,
-                "pan": pan,
-            })
-            t_cursor += dur
-
-        # Last beat actual audio end tak extend karo
-        if timeline:
-            timeline[-1]["end"] = actual_duration
+        # Simple continuous scroll: y = t * (scroll_range / total_duration)
+        # Audio ke saath perfectly sync — complex timeline ki zaroorat nahi
+        scroll_speed = scroll_range / max(0.01, actual_duration)
 
         def get_y_at_time(t):
-            if scroll_range <= 0 or not timeline:
+            if scroll_range <= 0:
                 return 0
-
-            # Find active beat
-            active_idx = len(timeline) - 1
-            for i, seg in enumerate(timeline):
-                if t < seg["end"]:
-                    active_idx = i
-                    break
-
-            seg = timeline[active_idx]
-            seg_start = seg["start"]
-            seg_end = seg["end"]
-            seg_dur = max(0.01, seg_end - seg_start)
-            center_y = seg["y"]
-            pan = seg.get("pan", "static")
-
-            # Pan range: sirf 12% of canvas — gentle reveal, scenes miss nahi honge
-            # 30% bahut zyada tha — screen jaldi jump karta tha
-            PAN_RANGE = int(CANVAS_H * 0.12)
-
-            # Transition: beats ke beech smooth ease (first 25% of beat duration)
-            # Zyada transition time = smoother feel between beats
-            TRANSITION_FRAC = 0.25
-            transition_time = min(0.4, seg_dur * TRANSITION_FRAC)
-            time_into_seg = t - seg_start
-
-            # Base y: smooth ease from prev beat center to this beat center
-            if active_idx > 0 and transition_time > 0 and time_into_seg < transition_time:
-                prev_y = timeline[active_idx - 1]["y"]
-                progress = time_into_seg / transition_time
-                # Ease-in-out: starts slow, fast in middle, slow at end
-                progress = progress * progress * (3 - 2 * progress)
-                base_y = prev_y + (center_y - prev_y) * progress
-            else:
-                base_y = float(center_y)
-
-            # Pan offset within beat — gentle reveal motion
-            # Only kicks in after transition is done
-            remaining_frac = max(0.0, time_into_seg - transition_time)
-            remaining_dur = max(0.01, seg_dur - transition_time)
-            pan_progress = min(1.0, remaining_frac / remaining_dur)
-            # Ease-out: fast start, gentle finish
-            pan_progress = 1 - (1 - pan_progress) ** 2
-
-            if pan == "top_to_bottom":
-                pan_offset = -PAN_RANGE + (2 * PAN_RANGE * pan_progress)
-            elif pan == "bottom_to_top":
-                pan_offset = PAN_RANGE - (2 * PAN_RANGE * pan_progress)
-            else:
-                pan_offset = 0
-
-            final_y = int(base_y + pan_offset)
-            return max(0, min(scroll_range, final_y))
+            return max(0, min(scroll_range, int(t * scroll_speed)))
 
         def _ken_burns(source_frame, t, dur, zoom_max=0.03):
             if dur <= 0:
