@@ -57,11 +57,11 @@ CANVAS_W, CANVAS_H = 1280, 720  # 16:9 landscape
 
 class MangaProcessor:
 
-    BEAT_PAUSE = 0.05  # beats ke beech silence gap — kam pause = smooth narrator
+    BEAT_PAUSE = 0.15  # beats ke beech silence gap — thoda breathing room
 
     MIN_GEMINI_GAP = 6.5  # seconds per key (free tier: 10 RPM)
 
-    AUDIO_SPEED = 1.4  # FIX #3: 1.5 se 1.4 kiya — natural narrator speed
+    AUDIO_SPEED = 1.25  # 1.4 pe robotic lagti thi, 1.25 natural + fast enough
 
     # FIX #4: Blank panel threshold 0.90 → 0.96 — sirf EXTREME white panels skip
     # Previous 0.90 threshold ne bahut saare valid light-bg panels skip kar diye the
@@ -849,36 +849,39 @@ class MangaProcessor:
             center_y = seg["y"]
             pan = seg.get("pan", "static")
 
-            # Beat ke andar pan motion: center_y ke aas paas ±pan_range pixels
-            # Pan range = CANVAS_H ka 30% (yaani crop window apne center se itna upar/niche jayegi)
-            PAN_RANGE = int(CANVAS_H * 0.30)
+            # Pan range: sirf 12% of canvas — gentle reveal, scenes miss nahi honge
+            # 30% bahut zyada tha — screen jaldi jump karta tha
+            PAN_RANGE = int(CANVAS_H * 0.12)
 
-            # Transition: beats ke beech smooth jump (first 15% of beat)
-            TRANSITION_FRAC = 0.15
-            transition_time = min(0.25, seg_dur * TRANSITION_FRAC)
+            # Transition: beats ke beech smooth ease (first 25% of beat duration)
+            # Zyada transition time = smoother feel between beats
+            TRANSITION_FRAC = 0.25
+            transition_time = min(0.4, seg_dur * TRANSITION_FRAC)
             time_into_seg = t - seg_start
 
-            # Base y: transition from prev beat center to this beat center
+            # Base y: smooth ease from prev beat center to this beat center
             if active_idx > 0 and transition_time > 0 and time_into_seg < transition_time:
                 prev_y = timeline[active_idx - 1]["y"]
                 progress = time_into_seg / transition_time
-                progress = 1 - (1 - progress) ** 3  # ease-out cubic
+                # Ease-in-out: starts slow, fast in middle, slow at end
+                progress = progress * progress * (3 - 2 * progress)
                 base_y = prev_y + (center_y - prev_y) * progress
             else:
                 base_y = float(center_y)
 
-            # Pan offset within this beat (after transition)
-            pan_progress = max(0.0, (time_into_seg - transition_time) / max(0.01, seg_dur - transition_time))
-            pan_progress = min(1.0, pan_progress)
+            # Pan offset within beat — gentle reveal motion
+            # Only kicks in after transition is done
+            remaining_frac = max(0.0, time_into_seg - transition_time)
+            remaining_dur = max(0.01, seg_dur - transition_time)
+            pan_progress = min(1.0, remaining_frac / remaining_dur)
+            # Ease-out: fast start, gentle finish
+            pan_progress = 1 - (1 - pan_progress) ** 2
 
             if pan == "top_to_bottom":
-                # Upar se shuru, niche tak jaao
                 pan_offset = -PAN_RANGE + (2 * PAN_RANGE * pan_progress)
             elif pan == "bottom_to_top":
-                # Niche se shuru, upar tak jaao
                 pan_offset = PAN_RANGE - (2 * PAN_RANGE * pan_progress)
             else:
-                # static — center pe raho
                 pan_offset = 0
 
             final_y = int(base_y + pan_offset)
